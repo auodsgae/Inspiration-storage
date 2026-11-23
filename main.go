@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/auodsgae/Inspiration-storage/internal/library"
+	"github.com/auodsgae/Inspiration-storage/internal/updates"
 	"github.com/auodsgae/Inspiration-storage/internal/video"
 	"github.com/egoist/mygo"
 )
@@ -22,6 +25,9 @@ const legacyDataFolder = "com.auodsgae.inspiration-storage"
 
 //go:embed public/index.html public/app.js public/library.js public/locale.js public/style.css public/board.js public/board.css
 var frontend embed.FS
+
+//go:embed mygo.json
+var buildConfig []byte
 
 func main() {
 	if err := runDesktop(); err != nil {
@@ -45,7 +51,13 @@ func runDesktop() error {
 	if err != nil {
 		return errors.New("Inspiration Storage could not open its bundled interface.")
 	}
-	handler, err := library.New(dataDir, web, video.Import)
+	version := installedVersion()
+	handler, err := library.New(dataDir, web, video.Import, library.UpdateEndpoint{
+		Version: version,
+		Check: func(ctx context.Context) (any, error) {
+			return updates.Check(ctx, version, runtime.GOOS, runtime.GOARCH)
+		},
+	})
 	if err != nil {
 		return errors.New("Inspiration Storage could not open its local library.")
 	}
@@ -93,6 +105,15 @@ func runDesktop() error {
 		return errors.New("Inspiration Storage could not start its desktop window.")
 	}
 	return nil
+}
+
+func installedVersion() string {
+	if version := mygo.App.Version(); version != "" {
+		return version
+	}
+	var config struct{ Version string }
+	_ = json.Unmarshal(buildConfig, &config)
+	return config.Version
 }
 
 func libraryDir() (string, error) {

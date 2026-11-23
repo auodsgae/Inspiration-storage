@@ -10,8 +10,8 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 func prepareDataDir(path string) (*os.Root, error) {
@@ -203,7 +203,45 @@ func (s *library) saveRaster(data []byte, mediaType string) (string, error) {
 			return "", err
 		}
 	}
-	return "/images/" + name, nil
+	path := "/images/" + name
+	// Uploads and imports return before their state PUT, even for a digest
+	// already attached to a layout.
+	s.pendingUploads[path]++
+	return path, nil
+}
+
+func (s *library) releaseImages(w http.ResponseWriter, r *http.Request) error {
+	body, err := requestObject(w, r, imageReleaseLimit, "invalidRequest")
+	if err != nil {
+		return err
+	}
+	paths, ok := body["images"].([]any)
+	if !ok {
+		return &APIError{"invalidRequest", http.StatusBadRequest}
+	}
+	for _, path := range paths {
+		if !localImage(path) {
+			return &APIError{"invalidRequest", http.StatusBadRequest}
+		}
+	}
+
+	s.imageMu.Lock()
+	for _, path := range paths {
+		s.releasePendingUpload(path.(string))
+	}
+	s.imageMu.Unlock()
+	writeJSON(w, r, http.StatusOK, []byte("{}"))
+	return nil
+}
+
+// releasePendingUpload requires the image lock.
+func (s *library) releasePendingUpload(path string) {
+	switch n := s.pendingUploads[path]; {
+	case n == 1:
+		delete(s.pendingUploads, path)
+	case n > 1:
+		s.pendingUploads[path] = n - 1
+	}
 }
 
 func (s *library) images() (*os.Root, error) {
@@ -216,6 +254,9 @@ func (s *library) images() (*os.Root, error) {
 }
 
 func (s *library) readRaster(name string) ([]byte, error) {
+	s.imageMu.RLock()
+	defer s.imageMu.RUnlock()
+
 	root, err := s.images()
 	if err != nil {
 		return nil, err
@@ -228,13 +269,72 @@ func (s *library) readRaster(name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256(data)
-	if hex.EncodeToString(sum[:]) != name[:64] {
-		return nil, fs.ErrNotExist
-	}
-	ext, ok := RasterExtension(data, "")
-	if !ok || filepath.Ext(name) != "."+ext {
+	if !matchesRasterAddress(name, data) {
 		return nil, fs.ErrNotExist
 	}
 	return data, nil
+}
+
+func matchesRasterAddress(name string, data []byte) bool {
+	ext, ok := RasterExtension(data, "")
+	if !ok {
+		return false
+	}
+	sum := sha256.Sum256(data)
+	return name == hex.EncodeToString(sum[:])+"."+ext
+}
+
+func reclaimOrphanedRasters(root *os.Root, live map[string]struct{}) {
+	images, err := openImageRoot(root)
+	if err != nil {
+		return
+	}
+	defer images.Close()
+	files, err := fs.ReadDir(images.FS(), ".")
+	if err != nil {
+		return
+	}
+	for _, file := range files {
+		name := file.Name()
+		path := "/images/" + name
+		if _, referenced := live[path]; !referenced && file.Type().IsRegular() && imagePath.MatchString(path) {
+			reclaimRaster(images, name)
+		}
+	}
+}
+
+// Only permanent Trash deletions reclaim files during the session. The
+// whiteboard may still need removed images for its in-memory undo history.
+func (s *library) reclaimRemovedTrashRasters(root *os.Root, nextTrash []any, refs map[imageReference]struct{}) {
+	removed := removedTrashImages(s.trash, nextTrash)
+	if len(removed) == 0 {
+		return
+	}
+	images, err := openImageRoot(root)
+	if err != nil {
+		return
+	}
+	defer images.Close()
+	live := liveImagePaths(refs)
+	for path := range removed {
+		if _, referenced := live[path]; !referenced && s.pendingUploads[path] == 0 {
+			reclaimRaster(images, strings.TrimPrefix(path, "/images/"))
+		}
+	}
+}
+
+func reclaimRaster(images *os.Root, name string) {
+	expected, err := images.Lstat(name)
+	if err != nil || !expected.Mode().IsRegular() {
+		return
+	}
+	data, err := readPrivateFile(images, name, imageLimit)
+	if err != nil || !matchesRasterAddress(name, data) {
+		return
+	}
+	info, err := images.Lstat(name)
+	if err == nil && os.SameFile(expected, info) {
+		// A failed unlink can be retried on next launch.
+		_ = images.Remove(name)
+	}
 }

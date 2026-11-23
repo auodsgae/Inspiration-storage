@@ -12,6 +12,7 @@ const navigation = document.querySelector('#navigation');
 const navigationToggle = document.querySelector('#navigation-toggle');
 const sidebar = document.querySelector('#sidebar');
 const sidebarScrim = document.querySelector('#sidebar-scrim');
+const updateNotice = document.querySelector('#update-notice');
 const toast = document.querySelector('#toast');
 const tabs = ['explore', 'labels', 'whiteboards', 'settings', 'trash'];
 const imageExtensions = /\.(avif|bmp|gif|jpe?g|png|webp)$/i;
@@ -37,6 +38,13 @@ let addDraft;
 let toastTimer;
 let saveQueue = Promise.resolve();
 let navigationRequest = 0;
+let updateStarted = false;
+let installedVersion = '';
+let updateResult = null;
+let updateRequest = null;
+let updateFailed = false;
+let offerUpdate = false;
+let dismissedUpdate = '';
 let t = translator(selectLanguage(null, navigator.language));
 
 const spec = { explore: renderExplore, labels: renderLabels, whiteboards: renderBoards, trash: renderTrash, settings: renderSettings };
@@ -417,7 +425,106 @@ function renderSettings() {
   main.innerHTML = `${pageHead('settings')}<div class="setting-panel">
     ${settingGroup('theme', state.settings.theme, [['light', 'light'], ['dark', 'dark']])}
     ${settingGroup('language', document.documentElement.lang, [['en', 'english'], ['zh-Hant', 'traditionalChinese']])}
+    <fieldset class="update-settings">
+      <legend>${txt('updates')}</legend>
+      <label class="setting-option">
+        <input type="checkbox" name="autoCheckUpdates"${automaticUpdatesEnabled() ? ' checked' : ''}>
+        <span>${txt('autoCheckUpdates')}</span>
+      </label>
+      <div class="update-status">
+        <p class="muted" data-installed-version></p>
+        <p data-update-status role="status"></p>
+      </div>
+      <div class="update-actions">
+        <button class="btn" type="button" data-action="check-update">${txt('checkForUpdates')}</button>
+        <span data-update-link></span>
+      </div>
+    </fieldset>
   </div>`;
+}
+
+function automaticUpdatesEnabled() {
+  return state.settings.autoCheckUpdates !== false;
+}
+
+function updateLink(result) {
+  if (!result?.available) return '';
+  const url = result.downloadURL || result.releaseURL;
+  if (!url) return '';
+  const label = result.downloadURL ? 'downloadUpdate' : 'viewUpdateRelease';
+  return `<a class="btn primary" href="${html(url)}" target="_blank" rel="noopener noreferrer">${txt(label)}</a>`;
+}
+
+function updateMessage() {
+  if (updateRequest) return t('checkingUpdates');
+  if (updateFailed) return t('updateCheckFailed');
+  if (!updateResult) return t('updatesNotChecked');
+  if (!updateResult.available) return t('latestVersion');
+  return t('updateAvailable', { version: updateResult.latest });
+}
+
+function renderUpdateStatus() {
+  const version = main.querySelector('[data-installed-version]');
+  if (version) {
+    version.textContent = installedVersion ? t('installedVersion', { version: installedVersion }) : '';
+    version.hidden = !installedVersion;
+    main.querySelector('[data-update-status]').textContent = updateMessage();
+    main.querySelector('[data-update-link]').innerHTML = updateLink(updateResult);
+    main.querySelector('[data-action="check-update"]').disabled = Boolean(updateRequest);
+  }
+  const visible = offerUpdate && automaticUpdatesEnabled() && updateResult?.available &&
+    updateResult.latest !== dismissedUpdate;
+  updateNotice.hidden = !visible;
+  if (visible) {
+    updateNotice.setAttribute('aria-label', t('updates'));
+    updateNotice.innerHTML = `
+      <span class="update-notice-title" role="status">${txt('updateAvailable', { version: updateResult.latest })}</span>
+      <div class="update-actions">
+        <button class="btn plain" type="button" data-action="dismiss-update">${txt('updateLater')}</button>
+        ${updateLink(updateResult)}
+      </div>`;
+  }
+}
+
+async function checkForUpdates(automatic = false) {
+  if (updateRequest || (automatic && !automaticUpdatesEnabled())) return;
+  const controller = new AbortController();
+  const request = { controller, automatic };
+  updateRequest = request;
+  updateFailed = false;
+  renderUpdateStatus();
+  try {
+    const result = await api('update', { method: 'POST', signal: controller.signal });
+    if (updateRequest !== request) return;
+    updateResult = result;
+    installedVersion = result.current || installedVersion;
+    offerUpdate = automatic;
+  } catch {
+    if (updateRequest === request) updateFailed = true;
+  } finally {
+    if (updateRequest === request) {
+      updateRequest = null;
+      renderUpdateStatus();
+    }
+  }
+}
+
+async function initializeUpdates() {
+  if (updateStarted) return;
+  updateStarted = true;
+  try {
+    const receipt = await api('version');
+    installedVersion = receipt.version;
+    renderUpdateStatus();
+  } catch {
+    // The GitHub check can still supply the installed version.
+  }
+  await checkForUpdates(true);
+}
+
+function dismissUpdate() {
+  dismissedUpdate = updateResult?.latest || '';
+  renderUpdateStatus();
 }
 
 function render() {
@@ -437,6 +544,7 @@ function render() {
   highlightNavigation();
   main.dataset.tab = tab;
   spec[tab]();
+  renderUpdateStatus();
 }
 
 async function navigate(next, nextBoard = '') {
@@ -465,6 +573,7 @@ function setSidebar(open, restoreFocus = false) {
   sidebarScrim.toggleAttribute('data-open', open);
   sidebar.inert = !open;
   main.inert = open;
+  updateNotice.inert = open;
   navigationToggle.setAttribute('aria-expanded', String(open));
 }
 
@@ -503,15 +612,32 @@ function clearLinkRequest(draft) {
   draft.linkRequest = null;
 }
 
+function releaseDraftUploads(paths) {
+  const images = paths.filter(Boolean);
+  // Finish draft cleanup before a subsequent Trash action can reclaim the images.
+  for (let offset = 0; offset < images.length; offset += 500) {
+    const batch = images.slice(offset, offset + 500);
+    saveQueue = saveQueue.then(() => api('image/release', json('POST', { images: batch }))).catch(() => {});
+  }
+}
+
 function clearImportFiles(draft) {
+  releaseDraftUploads(draft.files.map(entry => entry.upload?.image));
   for (const entry of draft.files) URL.revokeObjectURL(entry.preview);
   draft.files = [];
+}
+
+function clearImportMedia(draft) {
+  releaseDraftUploads([draft.linkUpload]);
+  draft.linkUpload = '';
+  draft.media = null;
 }
 
 function clearDraft() {
   if (addDraft) {
     clearLinkRequest(addDraft);
     clearImportFiles(addDraft);
+    clearImportMedia(addDraft);
   }
   addDraft = undefined;
 }
@@ -736,7 +862,7 @@ function addLayout(files = [], fromClipboard = false) {
     </div>${dialogButtons()}
   </form>`);
 
-  const draft = { media: null, files: [], linkUrl: '', linkTimer: null, linkRequest: null, review: '' };
+  const draft = { media: null, files: [], linkUrl: '', linkUpload: '', linkTimer: null, linkRequest: null, review: '' };
   addDraft = draft;
   const form = bindForm(async data => {
     if (!draft.files.length && !draft.media) throw error('missingImage');
@@ -886,7 +1012,7 @@ function addLayout(files = [], fromClipboard = false) {
       preview: URL.createObjectURL(file),
     }));
     if (author.value === draft.media?.publisher) author.value = '';
-    draft.media = null;
+    clearImportMedia(draft);
     showPictures();
   }
 
@@ -899,7 +1025,7 @@ function addLayout(files = [], fromClipboard = false) {
     retryThumbnail.hidden = true;
     if (draft.media && url !== draft.linkUrl) {
       if (author.value === draft.media.publisher) author.value = '';
-      draft.media = null;
+      clearImportMedia(draft);
       draft.linkUrl = '';
       showPictures();
     }
@@ -919,10 +1045,14 @@ function addLayout(files = [], fromClipboard = false) {
     try {
       const known = planImports(state, [{ url }]).duplicateLayouts[0]?.layout;
       const media = known ? { ...known } : await api('import', { ...json('POST', { url }), signal: request.signal });
-      if (!current()) return;
+      if (!current()) {
+        if (!known) releaseDraftUploads([media.image]);
+        return;
+      }
       clearImportFiles(draft);
       if (!author.value.trim()) author.value = media.publisher || '';
       draft.media = media;
+      draft.linkUpload = known ? '' : media.image;
       draft.linkUrl = url;
       showPictures();
       const plan = planImports(state, [{ ...media, sourceType: 'video' }]);
@@ -1351,6 +1481,8 @@ const actions = {
   'bulk-delete': bulkDelete,
   'bulk-restore': bulkRestore,
   'clear-trash': clearTrash,
+  'check-update': () => checkForUpdates(),
+  'dismiss-update': dismissUpdate,
   retry: start,
 };
 
@@ -1378,7 +1510,28 @@ main.addEventListener('change', async event => {
     if (name === 'explore-collection') applyCollection(value);
     return;
   }
-  if (tab !== 'settings' || !['theme', 'language'].includes(name)) return;
+  if (tab !== 'settings' || !['theme', 'language', 'autoCheckUpdates'].includes(name)) return;
+  if (name === 'autoCheckUpdates') {
+    const checkbox = event.target;
+    const enabled = checkbox.checked;
+    checkbox.disabled = true;
+    try {
+      await change(saved => { saved.settings.autoCheckUpdates = enabled; });
+      if (!enabled && updateRequest?.automatic) {
+        updateRequest.controller.abort();
+        updateRequest = null;
+      }
+      renderUpdateStatus();
+      if (enabled) void checkForUpdates(true);
+    } catch (reason) {
+      checkbox.checked = automaticUpdatesEnabled();
+      showError(reason.message);
+    } finally {
+      checkbox.disabled = false;
+      if (checkbox.isConnected) checkbox.focus({ preventScroll: true });
+    }
+    return;
+  }
   try {
     await change(saved => { saved.settings[name] = value; });
   } catch (reason) {
@@ -1470,6 +1623,7 @@ async function start() {
   try {
     state = await api('state');
     render();
+    void initializeUpdates();
   } catch (reason) {
     main.innerHTML = `<p class="form-error" role="alert">${html(reason.message)}</p><button type="button" class="btn" data-action="retry">${txt('retry')}</button>`;
   }

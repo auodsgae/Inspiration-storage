@@ -6,8 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"image"
-	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -86,11 +84,7 @@ func saveState(t *testing.T, h http.Handler, value map[string]any) *httptest.Res
 
 func fixtureImage(t *testing.T) []byte {
 	t.Helper()
-	var data bytes.Buffer
-	if err := png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
-		t.Fatal(err)
-	}
-	return data.Bytes()
+	return fixturePNG(t, 1)
 }
 
 func TestFreshLibraryUsesEmptyListsAndDefaultLabels(t *testing.T) {

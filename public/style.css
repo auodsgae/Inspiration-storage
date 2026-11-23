@@ -236,6 +236,30 @@ main[data-tab]:not([data-tab="explore"]) > .empty { max-width: var(--list-width,
 .setting-options { display: flex; flex-wrap: wrap; gap: 8px; }
 .setting-option { display: inline-flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; cursor: pointer; }
 .setting-option:has(input:checked) { border-color: var(--accent); background: var(--hover); }
+.update-settings { display: grid; justify-items: start; gap: 11px; }
+.update-status { display: grid; gap: 3px; font-size: .88rem; }
+.update-status [data-installed-version] { font-size: .8rem; }
+.update-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.update-actions > span:empty { display: none; }
+.update-notice {
+  position: fixed;
+  z-index: 9;
+  inset: auto 0 max(18px, env(safe-area-inset-bottom));
+  margin-inline: auto;
+  width: min(530px, calc(100% - 32px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px var(--shadow);
+}
+.update-notice-title { font-size: .91rem; font-weight: 700; }
+body:has(.fab) .update-notice { bottom: max(84px, calc(env(safe-area-inset-bottom) + 68px)); }
 input[type="checkbox"], input[type="radio"] { accent-color: var(--text); }
 dialog { color: var(--text); background: var(--surface); width: min(560px, calc(100% - 28px)); max-height: calc(100% - 30px); padding: 0; border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 16px 65px var(--shadow); }
 dialog[data-kind="preview"] { width: min(880px, calc(100% - 28px)); }

@@ -15,7 +15,11 @@ The app keeps imported files, labels and whiteboards on the computer. On macOS t
 
 On first launch after upgrading from v0.1.0, the app moves the existing library to the new folder. If both folders already exist, the app uses `inspiration-storage` and leaves the other folder in place.
 
-The interface and library communicate through the MyGo webview protocol. The app has no HTTP listener, account, cloud sync, analytics or automatic update service. Opening a library, importing a file or screenshot, and editing tags and whiteboards work offline.
+The interface and library communicate through the MyGo webview protocol. The app has no HTTP listener, account, cloud sync or analytics. Opening a library, importing a file or screenshot, and editing tags and whiteboards work offline.
+
+The app removes a permanently deleted image file once no other layout, Trash entry or whiteboard uses it. At startup it also clears orphaned image files from an existing, readable library. This lets whiteboard Undo work for the duration of the editing session.
+
+The app checks the public GitHub release on launch by default. You can turn this off or check manually in Settings under Updates. The check requests the latest release for this repository and sends no library data or installed version. The download button opens the installer link in your default browser so you can install the update locally.
 
 Importing an uncached video link makes HTTPS requests to YouTube or Bilibili and their thumbnail hosts. The provider receives the video identifier or short-link code and the usual connection information, including the public IP address. The importer drops share tracking parameters and sends no cookies, library files, labels or whiteboard contents. Selecting an original source link opens it in the system browser.
 

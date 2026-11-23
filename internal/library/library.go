@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	stateLimit   = 10 * 1024 * 1024
-	imageLimit   = 20 * 1024 * 1024
-	importLimit  = 8192
-	privateCache = "private, no-store"
+	stateLimit        = 10 * 1024 * 1024
+	imageLimit        = 20 * 1024 * 1024
+	imageReleaseLimit = 64 * 1024
+	importLimit       = 8192
+	privateCache      = "private, no-store"
 )
 
 // ImportedVideo is the metadata and raster thumbnail retrieved by an importer.
@@ -37,20 +38,30 @@ type APIError struct {
 
 func (e *APIError) Error() string { return e.Key }
 
+// UpdateEndpoint provides the bundled version and the optional release checker.
+type UpdateEndpoint struct {
+	Version string
+	Check   func(context.Context) (any, error)
+}
+
 type library struct {
 	dataDir  string
 	web      fs.FS
 	importer func(context.Context, string) (ImportedVideo, error)
+	update   UpdateEndpoint
 
-	stateMu  sync.RWMutex
-	revision int64
-	trash    []any
-	snapshot []byte
-	imageMu  sync.Mutex
+	stateMu   sync.RWMutex
+	revision  int64
+	trash     []any
+	snapshot  []byte
+	imageRefs map[imageReference]struct{}
+
+	imageMu        sync.RWMutex
+	pendingUploads map[string]int
 }
 
 // New opens the private data directory and creates a handler for MyGo's app protocol.
-func New(dataDir string, web fs.FS, importer func(context.Context, string) (ImportedVideo, error)) (http.Handler, error) {
+func New(dataDir string, web fs.FS, importer func(context.Context, string) (ImportedVideo, error), updates ...UpdateEndpoint) (http.Handler, error) {
 	root, err := prepareDataDir(dataDir)
 	if err != nil {
 		return nil, errors.New("could not open the library data directory")
@@ -61,7 +72,8 @@ func New(dataDir string, web fs.FS, importer func(context.Context, string) (Impo
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, errors.New("could not read the library state")
 	}
-	if errors.Is(err, fs.ErrNotExist) {
+	hasSavedState := err == nil
+	if !hasSavedState {
 		saved = []byte(defaultState)
 	}
 	state, ok := decodeObject(saved)
@@ -79,10 +91,19 @@ func New(dataDir string, web fs.FS, importer func(context.Context, string) (Impo
 	if err != nil {
 		return nil, errors.New("could not encode the library state")
 	}
-	return &library{
+	refs := referencedImages(state)
+	if hasSavedState {
+		reclaimOrphanedRasters(root, liveImagePaths(refs))
+	}
+	s := &library{
 		dataDir: dataDir, web: web, importer: importer,
-		revision: revision, trash: state["trash"].([]any), snapshot: snapshot,
-	}, nil
+		revision: revision, trash: state["trash"].([]any), snapshot: snapshot, imageRefs: refs,
+		pendingUploads: make(map[string]int),
+	}
+	if len(updates) > 0 {
+		s.update = updates[0]
+	}
+	return s, nil
 }
 
 var assetTypes = map[string]string{
@@ -146,6 +167,21 @@ func (s *library) serve(w http.ResponseWriter, r *http.Request) error {
 		return &APIError{"notFound", http.StatusNotFound}
 	}
 	switch r.URL.Path {
+	case "/api/version":
+		if r.Method != http.MethodGet {
+			return methodError(w, "GET")
+		}
+		payload, _ := json.Marshal(map[string]string{"version": s.update.Version})
+		writeJSON(w, r, http.StatusOK, payload)
+		return nil
+	case "/api/update":
+		if r.Method != http.MethodPost {
+			return methodError(w, "POST")
+		}
+		if err := requireWriteMarker(r); err != nil {
+			return err
+		}
+		return s.checkUpdate(w, r)
 	case "/api/state":
 		switch r.Method {
 		case http.MethodGet:
@@ -189,6 +225,14 @@ func (s *library) serve(w http.ResponseWriter, r *http.Request) error {
 		payload, _ := json.Marshal(map[string]string{"image": image})
 		writeJSON(w, r, http.StatusOK, payload)
 		return nil
+	case "/api/image/release":
+		if r.Method != http.MethodPost {
+			return methodError(w, "POST")
+		}
+		if err := requireWriteMarker(r); err != nil {
+			return err
+		}
+		return s.releaseImages(w, r)
 	case "/api/import":
 		if r.Method != http.MethodPost {
 			return methodError(w, "POST")
@@ -203,6 +247,23 @@ func (s *library) serve(w http.ResponseWriter, r *http.Request) error {
 		}
 		return s.serveAsset(w, r)
 	}
+}
+
+func (s *library) checkUpdate(w http.ResponseWriter, r *http.Request) error {
+	failed := &APIError{"updateCheckFailed", http.StatusBadGateway}
+	if s.update.Check == nil {
+		return failed
+	}
+	result, err := s.update.Check(r.Context())
+	if err != nil {
+		return failed
+	}
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return failed
+	}
+	writeJSON(w, r, http.StatusOK, payload)
+	return nil
 }
 
 func requireWriteMarker(r *http.Request) error {

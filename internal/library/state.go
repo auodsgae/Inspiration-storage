@@ -74,13 +74,84 @@ func (s *library) saveState(draft map[string]any) ([]byte, error) {
 		return nil, err
 	}
 	defer root.Close()
+
+	// Serialize the state commit and image removal with uploads and readers.
+	s.imageMu.Lock()
+	defer s.imageMu.Unlock()
 	if err := atomicWrite(root, "state.json", data); err != nil {
 		return nil, err
 	}
+
+	refs := referencedImages(saved)
+	s.attachUploads(refs)
+	nextTrash := saved["trash"].([]any)
+	s.reclaimRemovedTrashRasters(root, nextTrash, refs)
 	s.revision = revision + 1
-	s.trash = draft["trash"].([]any)
+	s.trash = nextTrash
 	s.snapshot = data
+	s.imageRefs = refs
 	return data, nil
+}
+
+type imageReference struct {
+	path, id, boardID string
+	usesUpload        bool
+}
+
+// referencedImages expects a validated state. Layouts and Trash share IDs, so
+// moving a layout does not claim an upload of the same image.
+func referencedImages(state map[string]any) map[imageReference]struct{} {
+	refs := make(map[imageReference]struct{})
+	add := func(items []any, boardID string) {
+		for _, value := range items {
+			item := value.(map[string]any)
+			refs[imageReference{
+				path: item["image"].(string), id: item["id"].(string), boardID: boardID,
+				usesUpload: boardID == "" || item["layoutId"] == nil,
+			}] = struct{}{}
+		}
+	}
+	add(state["layouts"].([]any), "")
+	add(state["trash"].([]any), "")
+	for _, value := range state["boards"].([]any) {
+		board := value.(map[string]any)
+		add(board["items"].([]any), board["id"].(string))
+	}
+	return refs
+}
+
+func liveImagePaths(refs map[imageReference]struct{}) map[string]struct{} {
+	paths := make(map[string]struct{}, len(refs))
+	for ref := range refs {
+		paths[ref.path] = struct{}{}
+	}
+	return paths
+}
+
+func (s *library) attachUploads(refs map[imageReference]struct{}) {
+	if len(s.pendingUploads) == 0 {
+		return
+	}
+	for ref := range refs {
+		if _, existed := s.imageRefs[ref]; !existed && ref.usesUpload {
+			s.releasePendingUpload(ref.path)
+		}
+	}
+}
+
+func removedTrashImages(previous, next []any) map[string]struct{} {
+	retainedIDs := make(map[string]struct{}, len(next))
+	for _, value := range next {
+		retainedIDs[value.(map[string]any)["id"].(string)] = struct{}{}
+	}
+	removed := make(map[string]struct{})
+	for _, value := range previous {
+		entry := value.(map[string]any)
+		if _, retained := retainedIDs[entry["id"].(string)]; !retained {
+			removed[entry["image"].(string)] = struct{}{}
+		}
+	}
+	return removed
 }
 
 func validState(state map[string]any) (int64, bool) {
@@ -127,6 +198,11 @@ func validSettings(value any, labels map[string]struct{}) bool {
 	language, ok := settings["language"]
 	if !ok || (language != nil && language != "en" && language != "zh-Hant") {
 		return false
+	}
+	if automatic, present := settings["autoCheckUpdates"]; present {
+		if _, ok := automatic.(bool); !ok {
+			return false
+		}
 	}
 	collections := settings["collections"]
 	if collections == nil {
