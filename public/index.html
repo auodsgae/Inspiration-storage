@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Inspiration Storage</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/board.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="app-layout">
+    <button id="navigation-toggle" class="sidebar-toggle" type="button" aria-label="Show or hide navigation"
+      title="Show or hide navigation" aria-controls="sidebar" aria-expanded="false">
+      <span class="menu-icon" aria-hidden="true"></span>
+    </button>
+    <div id="sidebar-scrim" class="sidebar-scrim" aria-hidden="true"></div>
+    <aside id="sidebar" class="sidebar" inert>
+      <div class="sidebar-content">
+        <button class="brand" type="button" data-action="navigate" data-tab="explore">
+          <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span><span id="brand-name">Layout Library</span>
+        </button>
+        <nav id="navigation"></nav>
+        <span id="ratio" class="ratio"></span>
+      </div>
+    </aside>
+    <main id="content" class="shell"><p class="muted" role="status">Loading the library…</p></main>
+  </div>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  <div id="toast" class="toast" role="alert" hidden></div>
+</body>
+</html>

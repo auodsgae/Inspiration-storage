@@ -1,0 +1,115 @@
+name: Windows installer smoke test
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Test the frontend
+        run: npm test
+
+      - name: Test Go packages
+        run: go test ./...
+
+      - name: Build installer
+        run: go tool mygo build -platform windows/amd64
+
+      - name: Ensure WebView2 is available
+        run: |
+          $runtimeId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $locations = "HKLM:\Software\WOW6432Node\Microsoft\EdgeUpdate\Clients\$runtimeId",
+                       "HKCU:\Software\Microsoft\EdgeUpdate\Clients\$runtimeId"
+          foreach ($location in $locations) {
+            $version = Get-ItemPropertyValue $location -Name pv -ErrorAction SilentlyContinue
+            if ($version -and $version -ne '0.0.0.0') {
+              Write-Host "Found WebView2 $version."
+              exit 0
+            }
+          }
+          $bootstrapper = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebview2Setup.exe'
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $bootstrapper
+          $signature = Get-AuthenticodeSignature $bootstrapper
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') {
+            throw 'The WebView2 bootstrapper does not have a valid Microsoft signature.'
+          }
+          $runtimeSetup = Start-Process $bootstrapper -ArgumentList '/silent', '/install' -Wait -PassThru
+          if ($runtimeSetup.ExitCode -ne 0) { throw "WebView2 setup exited with code $($runtimeSetup.ExitCode)." }
+
+      - name: Verify installation and launch
+        id: installer
+        run: |
+          $config = Get-Content mygo.json -Raw | ConvertFrom-Json
+          $installer = Get-Item "dist/windows-amd64/inspiration-storage-setup-$($config.version)-amd64.exe"
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip/7z.exe'
+          & $sevenZip t $installer.FullName
+          if ($LASTEXITCODE -ne 0) { throw 'The installer archive could not be verified.' }
+          Get-FileHash $installer.FullName
+
+          $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$($config.identifier)"
+          if (Test-Path $uninstallKey) { throw 'The app is already installed on the runner.' }
+          $setup = Start-Process $installer.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Installer exited with code $($setup.ExitCode)." }
+
+          $registration = Get-ItemProperty $uninstallKey
+          if ($registration.DisplayVersion -ne $config.version) {
+            throw "Installed version $($registration.DisplayVersion) differs from $($config.version)."
+          }
+          $installDir = $registration.InstallLocation
+          $expectedFiles = '.mygo-files', "$($config.name).exe", 'THIRD_PARTY_NOTICES.txt', 'Uninstall.exe'
+          $installedFiles = (Get-ChildItem -LiteralPath $installDir -Force).Name
+          if (Compare-Object $expectedFiles $installedFiles) {
+            throw "Unexpected install contents: $($installedFiles -join ', ')."
+          }
+          $app = Join-Path $installDir "$($config.name).exe"
+          $appHash = (Get-FileHash -LiteralPath $app).Hash
+          $builtHash = (Get-FileHash -LiteralPath "dist/windows-amd64/$($config.name).exe").Hash
+          if ($appHash -ne $builtHash) { throw 'The installed executable differs from the build.' }
+          $installedNotices = (Get-FileHash -LiteralPath (Join-Path $installDir 'THIRD_PARTY_NOTICES.txt')).Hash
+          $sourceNotices = (Get-FileHash -LiteralPath 'resources/THIRD_PARTY_NOTICES.txt').Hash
+          if ($installedNotices -ne $sourceNotices) { throw 'The installed notices differ from the source.' }
+          Write-Host "Installed version $($registration.DisplayVersion) with $($installedFiles -join ', ')."
+
+          $appProcess = Start-Process -FilePath $app -WorkingDirectory $installDir -PassThru
+          try {
+            $deadline = [datetime]::UtcNow.AddSeconds(45)
+            do {
+              $appProcess.Refresh()
+              if ($appProcess.HasExited) { throw "The desktop app exited with code $($appProcess.ExitCode)." }
+              $webView = Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe' AND ParentProcessId = $($appProcess.Id)"
+              if ($appProcess.MainWindowTitle -eq $config.name -and $webView) { break }
+              Start-Sleep -Milliseconds 500
+            } while ([datetime]::UtcNow -lt $deadline)
+            if ($appProcess.MainWindowTitle -ne $config.name -or -not $webView) {
+              throw "The app did not open its main window with WebView2. Window title: '$($appProcess.MainWindowTitle)'."
+            }
+            Write-Host "Opened '$($appProcess.MainWindowTitle)' with WebView2."
+          } finally {
+            if (-not $appProcess.HasExited) {
+              [void]$appProcess.CloseMainWindow()
+              if (-not $appProcess.WaitForExit(5000)) { $appProcess.Kill() }
+            }
+          }
+
+          "path=$($installer.FullName)" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-amd64-installer
+          path: ${{ steps.installer.outputs.path }}
+          if-no-files-found: error
+          compression-level: 0

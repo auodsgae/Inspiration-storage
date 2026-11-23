@@ -1,0 +1,177 @@
+body:has(#board-host) {
+  overflow: hidden;
+}
+
+main:has(#board-host) {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100vh;
+  height: 100dvh;
+  margin: 0;
+  padding: 0;
+}
+
+.board-header {
+  display: flex;
+  align-items: center;
+  gap: clamp(8px, 2.4vw, 28px);
+  min-height: 66px;
+  padding: 8px var(--page-gutter) 8px calc(var(--page-gutter) + 50px);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.board-header h1, .board-header .whiteboard-selection-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-header h1 {
+  font-size: clamp(1.02rem, 2.8vw, 1.4rem);
+  font-weight: 700;
+  letter-spacing: -.025em;
+}
+
+.whiteboard-selection-name {
+  max-width: 42%;
+  margin-inline-start: auto;
+  color: var(--muted);
+  font-size: .9rem;
+}
+
+.board-back {
+  flex: none;
+  padding-inline: 7px;
+}
+
+#board-host { min-width: 0; min-height: 0; }
+.whiteboard { height: 100%; }
+
+.whiteboard .whiteboard-viewport:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.whiteboard .whiteboard-viewport {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  overflow: clip;
+  height: 100%;
+  background-color: var(--surface);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.whiteboard .whiteboard-viewport[data-dragging],
+.whiteboard .whiteboard-viewport[data-dragging] .whiteboard-item {
+  cursor: grabbing;
+}
+
+.whiteboard .whiteboard-viewport[data-resizing] {
+  cursor: nwse-resize;
+}
+.whiteboard .whiteboard-viewport:is([data-resizing='ne'], [data-resizing='sw']) { cursor: nesw-resize; }
+.whiteboard .whiteboard-viewport[data-resizing] .whiteboard-item { cursor: inherit; }
+
+.whiteboard .whiteboard-viewport[data-dropping]::after {
+  position: absolute;
+  z-index: 2;
+  inset: 8px;
+  border: 2px dashed var(--accent);
+  border-radius: 6px;
+  pointer-events: none;
+  content: '';
+}
+
+.whiteboard .whiteboard-plane {
+  position: absolute;
+  inset: 0;
+  transform: translate(var(--whiteboard-pan-x, 0px), var(--whiteboard-pan-y, 0px)) scale(var(--whiteboard-zoom, 1));
+  transform-origin: top left;
+  pointer-events: none;
+}
+
+.whiteboard .whiteboard-item {
+  position: absolute;
+  display: block;
+  overflow: visible;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: var(--page);
+  box-shadow: 0 0 0 1px var(--line);
+  cursor: grab;
+  pointer-events: auto;
+}
+
+.whiteboard .whiteboard-item[aria-pressed='true'],
+.whiteboard .whiteboard-item:focus-visible {
+  z-index: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.whiteboard .whiteboard-item:focus-visible {
+  outline-style: dashed;
+}
+
+.whiteboard-resize {
+  position: absolute;
+  display: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--surface);
+  border-radius: 4px;
+  background: var(--accent);
+  transform: translate(var(--grip-x, 50%), var(--grip-y, 50%)) scale(var(--whiteboard-inverse-zoom, 1));
+  cursor: nwse-resize;
+}
+
+.whiteboard-resize[data-corner^='n'] { top: 0; --grip-y: -50%; }
+.whiteboard-resize[data-corner^='s'] { bottom: 0; }
+.whiteboard-resize[data-corner$='w'] { left: 0; --grip-x: -50%; }
+.whiteboard-resize[data-corner$='e'] { right: 0; }
+.whiteboard-resize:is([data-corner='ne'], [data-corner='sw']) { cursor: nesw-resize; }
+
+.whiteboard-item[aria-pressed='true'] .whiteboard-resize { display: block; }
+
+.whiteboard .whiteboard-item img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.whiteboard .whiteboard-empty {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: max-content;
+  max-width: calc(100% - 40px);
+  padding: 12px 18px;
+  border-radius: 8px;
+  background: var(--surface);
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+}
+
+.whiteboard .whiteboard-empty-title {
+  margin: 0 0 4px;
+  color: var(--text);
+  font-size: 1.125rem;
+  font-weight: 650;
+}
+
+.whiteboard .whiteboard-empty-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
