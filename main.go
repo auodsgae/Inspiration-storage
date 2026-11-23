@@ -17,7 +17,8 @@ import (
 )
 
 const appName = "Inspiration Storage"
-const appID = "com.auodsgae.inspiration-storage"
+const dataFolder = "inspiration-storage"
+const legacyDataFolder = "com.auodsgae.inspiration-storage"
 
 //go:embed public/index.html public/app.js public/library.js public/locale.js public/style.css public/board.js public/board.css
 var frontend embed.FS
@@ -97,14 +98,39 @@ func runDesktop() error {
 func libraryDir() (string, error) {
 	if runtime.GOOS == "windows" {
 		if local := os.Getenv("LOCALAPPDATA"); filepath.IsAbs(local) {
-			return filepath.Join(local, appID), nil
+			return libraryDirIn(local)
 		}
 	}
 	root, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(root, appID), nil
+	return libraryDirIn(root)
+}
+
+func libraryDirIn(root string) (string, error) {
+	path := filepath.Join(root, dataFolder)
+	if _, err := os.Lstat(path); err == nil {
+		return path, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+
+	old := filepath.Join(root, legacyDataFolder)
+	info, err := os.Lstat(old)
+	if errors.Is(err, fs.ErrNotExist) {
+		return path, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fs.ErrInvalid
+	}
+	if err := os.Rename(old, path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func isFrontendURL(value string) bool {

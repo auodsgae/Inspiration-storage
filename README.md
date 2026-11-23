@@ -11,7 +11,9 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 
 ## Local data and network use
 
-The app keeps imported files, labels and whiteboards on the computer. On macOS the library is under `~/Library/Application Support/com.auodsgae.inspiration-storage`. On Windows it is under `%LOCALAPPDATA%\com.auodsgae.inspiration-storage`.
+The app keeps imported files, labels and whiteboards on the computer. On macOS the library is under `~/Library/Application Support/inspiration-storage`. On Windows it is under `%LOCALAPPDATA%\inspiration-storage`.
+
+On first launch after upgrading from v0.1.0, the app moves the existing library to the new folder. If both folders already exist, the app uses `inspiration-storage` and leaves the other folder in place.
 
 The interface and library communicate through the MyGo webview protocol. The app has no HTTP listener, account, cloud sync, analytics or automatic update service. Opening a library, importing a file or screenshot, and editing tags and whiteboards work offline.
 

@@ -1,7 +1,7 @@
 {
   "name": "Inspiration Storage",
   "identifier": "com.auodsgae.inspiration-storage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "resources": ["resources/THIRD_PARTY_NOTICES.txt"],
   "resourcesExclude": ["**"]
 }
