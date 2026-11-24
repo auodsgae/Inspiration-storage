@@ -170,6 +170,27 @@ func TestConcurrentRevisionsAndOptionalFieldsSurviveRestart(t *testing.T) {
 	}
 }
 
+func TestWhiteboardViewIsOptionalAndSurvivesReopening(t *testing.T) {
+	dir := t.TempDir()
+	h := openLibrary(t, dir, nil)
+	draft := stateResponse(t, send(h, request(http.MethodGet, "/api/state", nil, "")))
+	board := map[string]any{"id": "b", "name": "Board", "items": []any{}}
+	draft["boards"] = []any{board}
+	view := map[string]any{"x": -318.5, "y": 95.25, "scale": 1.75}
+	for _, invalid := range []any{nil, map[string]any{"x": 0, "y": 0, "scale": 0}, map[string]any{"x": "0", "y": 0, "scale": 1}} {
+		board["view"] = invalid
+		requireError(t, saveState(t, h, draft), http.StatusBadRequest, "invalidState")
+	}
+	board["view"] = view
+	stateResponse(t, saveState(t, h, draft))
+	h = openLibrary(t, dir, nil)
+	reopened := stateResponse(t, send(h, request(http.MethodGet, "/api/state", nil, "")))
+	savedView := reopened["boards"].([]any)[0].(map[string]any)["view"]
+	if !reflect.DeepEqual(savedView, view) {
+		t.Fatalf("reopened view was %#v, want %#v", savedView, view)
+	}
+}
+
 func TestUploadsUsePrivateContentAddressedImages(t *testing.T) {
 	dir := t.TempDir()
 	h := openLibrary(t, dir, nil)

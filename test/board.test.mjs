@@ -73,6 +73,13 @@ test('zoom clamps both limits without losing the pointer anchor', () => {
   assert.deepEqual(board.boardPoint(largest, anchor), anchor);
 });
 
+test('a selection rectangle finds intersecting images at the current pan and zoom', () => {
+  const view = { x: -40, y: 20, scale: 2 };
+  const rect = { x: 500, y: 220, width: 80, height: 300 };
+  assert.deepEqual(board.boardItemsInRect([reference, upload], view, rect), [reference.id, upload.id]);
+  assert.deepEqual(board.boardItemsInRect([reference, upload], view, { ...rect, width: 60 }), [reference.id]);
+});
+
 test('resizing preserves aspect ratio and anchors the original top-left', () => {
   const resized = board.resizeBoardImage(reference, 120, 67.5);
   assert.deepEqual(resized, { ...reference, width: 360, height: 202.5 });

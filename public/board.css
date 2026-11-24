@@ -62,14 +62,27 @@ main:has(#board-host) {
   overflow: clip;
   height: 100%;
   background-color: var(--surface);
-  cursor: grab;
+  cursor: default;
   touch-action: none;
   user-select: none;
 }
 
-.whiteboard .whiteboard-viewport[data-dragging],
-.whiteboard .whiteboard-viewport[data-dragging] .whiteboard-item {
+.whiteboard .whiteboard-viewport[data-pan-ready],
+.whiteboard .whiteboard-viewport[data-pan-ready] :is(.whiteboard-item, .whiteboard-resize) {
+  cursor: grab;
+}
+
+.whiteboard .whiteboard-viewport[data-panning],
+.whiteboard .whiteboard-viewport[data-panning] :is(.whiteboard-item, .whiteboard-resize) {
   cursor: grabbing;
+}
+
+.whiteboard-marquee {
+  position: absolute;
+  z-index: 2;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  pointer-events: none;
 }
 
 .whiteboard .whiteboard-viewport[data-resizing] {
@@ -105,7 +118,7 @@ main:has(#board-host) {
   border-radius: 3px;
   background: var(--page);
   box-shadow: 0 0 0 1px var(--line);
-  cursor: grab;
+  cursor: inherit;
   pointer-events: auto;
 }
 
@@ -138,7 +151,7 @@ main:has(#board-host) {
 .whiteboard-resize[data-corner$='e'] { right: 0; }
 .whiteboard-resize:is([data-corner='ne'], [data-corner='sw']) { cursor: nesw-resize; }
 
-.whiteboard-item[aria-pressed='true'] .whiteboard-resize { display: block; }
+.whiteboard-viewport[data-single-selection] .whiteboard-item[aria-pressed='true'] .whiteboard-resize { display: block; }
 
 .whiteboard .whiteboard-item img {
   display: block;

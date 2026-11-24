@@ -154,6 +154,7 @@ const strings = {
   boardUploadError: ['Couldn’t add the image.', '無法新增圖片。'],
   boardSaveError: ['Couldn’t save changes to the board.', '無法儲存白板變更。'],
   boardImageName: ['Image', '圖片'],
+  boardSelectedCount: ['{count} images selected', '已選取 {count} 張圖片'],
   theme: ['Theme', '主題'],
   light: ['Light', '淺色'],
   dark: ['Dark', '深色'],

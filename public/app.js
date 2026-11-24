@@ -447,11 +447,17 @@ function renderBoards() {
       board,
       t,
       uploadImage,
+      isInternalDrag: isGalleryDrag,
       showError,
       saveItems: items => change(draft => {
         const saved = draft.boards.find(item => item.id === board.id);
         if (!saved) throw error('notFound');
         saved.items = items;
+      }),
+      saveView: view => change(draft => {
+        const saved = draft.boards.find(item => item.id === board.id);
+        if (!saved) throw error('notFound');
+        saved.view = view;
       }),
     });
     return;
@@ -683,7 +689,7 @@ function setSidebar(open, restoreFocus = false) {
   if (open) highlightNavigation();
   sidebar.toggleAttribute('data-open', open);
   sidebar.inert = !open;
-  if (!open) endBoardDrag();
+  if (!open) highlightBoardDrop(null);
   const draggable = canDragGalleryImages();
   for (const image of main.querySelectorAll('.card .art')) image.draggable = draggable;
   navigationToggle.setAttribute('aria-expanded', String(open));
@@ -1210,7 +1216,7 @@ function addLayout(files = [], fromClipboard = false) {
     }
   });
   dropZone.addEventListener('dragover', event => {
-    if (event.dataTransfer.types.includes('Files')) dropZone.classList.add('is-over');
+    if (!isGalleryDrag(event) && event.dataTransfer?.types.includes('Files')) dropZone.classList.add('is-over');
   });
   dropZone.addEventListener('dragleave', event => {
     if (!dropZone.contains(event.relatedTarget)) dropZone.classList.remove('is-over');
@@ -1716,6 +1722,10 @@ function endBoardDrag() {
   highlightBoardDrop(null);
 }
 
+function isGalleryDrag(event) {
+  return Boolean(draggedLayoutId || event.dataTransfer?.types.includes(boardDragType));
+}
+
 main.addEventListener('dragstart', event => {
   const image = event.target.closest('.card .art');
   if (!image) return;
@@ -1728,16 +1738,13 @@ main.addEventListener('dragstart', event => {
   event.dataTransfer.setData(boardDragType, '1');
   event.dataTransfer.effectAllowed = 'copy';
   draggedLayoutId = id;
+  main.querySelector('.drop-indicator')?.setAttribute('hidden', '');
   image.addEventListener('dragend', endBoardDrag, { once: true });
   if (!boardListOpen) setBoardList(true);
 });
 
-function isBoardDrag(event) {
-  return draggedLayoutId && canDragGalleryImages() && event.dataTransfer?.types.includes(boardDragType);
-}
-
 navigation.addEventListener('dragover', event => {
-  if (!isBoardDrag(event)) return;
+  if (!draggedLayoutId || !canDragGalleryImages() || !event.dataTransfer) return;
   const target = event.target.closest('.nav-board-link');
   highlightBoardDrop(target);
   if (!target) return;
@@ -1751,8 +1758,9 @@ navigation.addEventListener('dragleave', event => {
 
 navigation.addEventListener('drop', async event => {
   const target = event.target.closest('.nav-board-link');
-  if (!target || !isBoardDrag(event)) return;
+  if (!target || !draggedLayoutId || !canDragGalleryImages()) return;
   event.preventDefault();
+  event.stopPropagation();
   const layout = layoutById(draggedLayoutId);
   const id = target.dataset.id;
   const board = state.boards.find(item => item.id === id);
@@ -1779,7 +1787,14 @@ navigation.addEventListener('drop', async event => {
 });
 
 document.addEventListener('dragover', event => {
-  if (!event.dataTransfer.types.includes('Files')) return;
+  if (isGalleryDrag(event)) {
+    if (!event.defaultPrevented && event.dataTransfer) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'none';
+    }
+    return;
+  }
+  if (!event.dataTransfer?.types.includes('Files')) return;
   event.preventDefault();
   if (handlesExploreDrop() && !dialog.open) main.querySelector('.drop-indicator').hidden = false;
 });
@@ -1789,7 +1804,12 @@ document.addEventListener('dragleave', event => {
 });
 
 document.addEventListener('drop', event => {
-  const files = [...event.dataTransfer.files];
+  if (isGalleryDrag(event)) {
+    event.preventDefault();
+    endBoardDrag();
+    return;
+  }
+  const files = [...(event.dataTransfer?.files ?? [])];
   if (!files.length) return;
   event.preventDefault();
   main.querySelector('.drop-indicator')?.setAttribute('hidden', '');

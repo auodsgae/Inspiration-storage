@@ -71,6 +71,14 @@ export function boardPoint(view, point) {
   return { x: (point.x - view.x) / view.scale, y: (point.y - view.y) / view.scale };
 }
 
+export function boardItemsInRect(items, view, bounds) {
+  const { x, y } = boardPoint(view, bounds);
+  const right = x + bounds.width / view.scale;
+  const bottom = y + bounds.height / view.scale;
+  return items.filter(item => item.x < right && item.x + item.width > x &&
+    item.y < bottom && item.y + item.height > y).map(item => item.id);
+}
+
 export function zoomBoardView(view, requestedScale, anchor) {
   const scale = Math.max(0.125, Math.min(8, requestedScale));
   const world = boardPoint(view, anchor);
@@ -97,7 +105,7 @@ export function resizeBoardImage(item, dx, dy, corner = 'se') {
   };
 }
 
-export function mountBoard({ element, selectionName, board, saveItems, uploadImage, t, showError }) {
+export function mountBoard({ element, selectionName, board, saveItems, saveView, uploadImage, isInternalDrag, t, showError }) {
   const document = element.ownerDocument;
   const window = document.defaultView;
   const listeners = new window.AbortController();
@@ -121,7 +129,10 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
   empty.append(create('p', 'whiteboard-empty-title', t('boardEmptyTitle')),
     create('p', 'whiteboard-empty-hint', t('boardEmptyHint')));
   const plane = create('div', 'whiteboard-plane');
-  viewport.append(empty, plane);
+  const marquee = create('div', 'whiteboard-marquee');
+  marquee.hidden = true;
+  marquee.setAttribute('aria-hidden', 'true');
+  viewport.append(empty, plane, marquee);
   wrapper.append(viewport);
   element.replaceChildren(wrapper);
 
@@ -130,17 +141,26 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
   const pending = [];
   const itemNodes = new Map();
   let saving = false;
-  let selectedId = null;
-  let view = { x: 0, y: 0, scale: 1 };
+  let selectedIds = new Set();
+  let view = board.view ?? { x: 0, y: 0, scale: 1 };
+  let pendingView = null;
+  let viewTimer;
+  let spaceHeld = false;
   let drag = null;
   let pinch = null;
 
-  function showSelection(id) {
-    itemNodes.get(selectedId)?.setAttribute('aria-pressed', 'false');
-    const item = history.items.find((entry) => entry.id === id);
-    selectedId = item?.id ?? null;
-    itemNodes.get(selectedId)?.setAttribute('aria-pressed', 'true');
-    const name = item?.name ?? '';
+  function showSelection(ids) {
+    const next = new Set([...ids].filter(id => itemNodes.has(id)));
+    for (const id of selectedIds) {
+      if (!next.has(id)) itemNodes.get(id)?.setAttribute('aria-pressed', 'false');
+    }
+    for (const id of next) {
+      if (!selectedIds.has(id)) itemNodes.get(id).setAttribute('aria-pressed', 'true');
+    }
+    selectedIds = next;
+    viewport.toggleAttribute('data-single-selection', next.size === 1);
+    const name = next.size > 1 ? t('boardSelectedCount', { count: next.size }) : next.size
+      ? history.items.find(item => next.has(item.id)).name : '';
     if (selectionName.textContent !== name) selectionName.textContent = name;
     selectionName.title = name;
   }
@@ -167,6 +187,7 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
         button = create('button', 'whiteboard-item');
         button.type = 'button';
         button.dataset.itemId = item.id;
+        button.setAttribute('aria-pressed', 'false');
         const image = create('img');
         image.alt = '';
         image.draggable = false;
@@ -183,12 +204,11 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
       }
       button.title = item.name;
       button.setAttribute('aria-label', item.name);
-      button.setAttribute('aria-pressed', 'false');
       positionItem(button, item);
     }
 
     empty.hidden = history.items.length > 0;
-    showSelection(selectedId);
+    showSelection(selectedIds);
   }
 
   async function persist() {
@@ -233,17 +253,39 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
   }
 
   function removeSelection() {
-    if (selectedId === null) return;
+    if (selectedIds.size === 0) return;
     endDrag();
-    applyHistory(history.edit(history.items.filter((item) => item.id !== selectedId)));
+    applyHistory(history.edit(history.items.filter(item => !selectedIds.has(item.id))));
   }
 
-  function setView(next) {
-    view = next;
+  function renderView() {
     viewport.style.setProperty('--whiteboard-pan-x', `${view.x}px`);
     viewport.style.setProperty('--whiteboard-pan-y', `${view.y}px`);
     viewport.style.setProperty('--whiteboard-zoom', String(view.scale));
     viewport.style.setProperty('--whiteboard-inverse-zoom', String(1 / view.scale));
+  }
+
+  function flushView() {
+    window.clearTimeout(viewTimer);
+    if (!pendingView) return;
+    const next = pendingView;
+    pendingView = null;
+    work.run(async () => {
+      try {
+        await saveView(next);
+      } catch (error) {
+        if (!signal.aborted) showError(error?.message || t('boardSaveError'));
+      }
+    });
+  }
+
+  function setView(next) {
+    if (view.x === next.x && view.y === next.y && view.scale === next.scale) return;
+    view = next;
+    renderView();
+    pendingView = view;
+    window.clearTimeout(viewTimer);
+    viewTimer = window.setTimeout(flushView, 220);
   }
 
   function centerPoint() {
@@ -270,29 +312,39 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
     });
   }
 
-  function endDrag() {
+  function endDrag(cancelled = true) {
     if (!drag) return;
-    const { item, placement, corner, pointerId } = drag;
+    const { item, placement, pointerId, mode, moveIds, selectionBefore } = drag;
     drag = null;
-    item?.style.removeProperty('transform');
-    if (corner) positionItem(item, placement);
-    delete viewport.dataset.dragging;
+    if (mode === 'move') {
+      for (const id of moveIds) itemNodes.get(id)?.style.removeProperty('transform');
+    }
+    if (mode === 'resize') positionItem(item, placement);
+    if (mode === 'select' && cancelled) showSelection(selectionBefore);
+    marquee.hidden = true;
+    delete viewport.dataset.panning;
     delete viewport.dataset.resizing;
     if (viewport.hasPointerCapture(pointerId)) viewport.releasePointerCapture(pointerId);
   }
 
   function startDrag(event) {
-    const panning = event.button === 1;
+    const panning = event.button === 1 || (event.button === 0 && spaceHeld);
     if ((event.button !== 0 && !panning) || !event.isPrimary || drag || pinch) return;
     const item = panning ? null : event.target.closest('.whiteboard-item');
-    const placement = history.items.find(entry => entry.id === item?.dataset.itemId);
+    const id = item?.dataset.itemId;
+    const placement = history.items.find(entry => entry.id === id);
     const corner = placement && event.target.closest('.whiteboard-resize')?.dataset.corner;
-    const focusTarget = item ?? viewport;
-    focusTarget.focus({ preventScroll: true });
-    if (!panning) showSelection(item?.dataset.itemId);
-    drag = { item, placement, corner, pointerId: event.pointerId, x: event.clientX, y: event.clientY, view };
+    const mode = panning ? 'pan' : corner ? 'resize' : item ? 'move' : 'select';
+    const additive = event.ctrlKey || event.metaKey;
+    const selectionBefore = selectedIds;
+    if (mode === 'move' && !selectedIds.has(id)) {
+      showSelection(additive ? [...selectedIds, id] : [id]);
+    }
+    drag = { mode, item, placement, corner, additive, selectionBefore, moveIds: selectedIds,
+      pointerId: event.pointerId, x: event.clientX, y: event.clientY, start: clientPoint(event), view, moved: false };
+    (item ?? viewport).focus({ preventScroll: true });
     viewport.setPointerCapture(event.pointerId);
-    viewport.dataset.dragging = '';
+    if (mode === 'pan') viewport.dataset.panning = '';
     if (corner) viewport.dataset.resizing = corner;
     event.preventDefault();
   }
@@ -301,29 +353,69 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
     if (event.pointerId !== drag?.pointerId) return;
     const dx = event.clientX - drag.x;
     const dy = event.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 3) return;
+    drag.moved = true;
     const scale = drag.view.scale;
-    if (drag.corner) {
+    if (drag.mode === 'pan') {
+      setView({ ...drag.view, x: drag.view.x + dx, y: drag.view.y + dy });
+    } else if (drag.mode === 'resize') {
       positionItem(drag.item, resizeBoardImage(drag.placement, dx / scale, dy / scale, drag.corner));
+    } else if (drag.mode === 'move') {
+      const transform = `translate(${dx / scale}px, ${dy / scale}px)`;
+      for (const id of drag.moveIds) {
+        const node = itemNodes.get(id);
+        if (node) node.style.transform = transform;
+      }
+    } else {
+      const point = clientPoint(event);
+      const bounds = { x: Math.min(drag.start.x, point.x), y: Math.min(drag.start.y, point.y),
+        width: Math.abs(drag.start.x - point.x), height: Math.abs(drag.start.y - point.y) };
+      marquee.hidden = false;
+      positionItem(marquee, bounds);
+      const hits = boardItemsInRect(history.items, drag.view, bounds);
+      showSelection(drag.additive ? [...drag.selectionBefore, ...hits] : hits);
     }
-    else if (drag.item) drag.item.style.transform = `translate(${dx / scale}px, ${dy / scale}px)`;
-    else setView({ ...drag.view, x: drag.view.x + dx, y: drag.view.y + dy });
   }
 
   function finishDrag(event) {
     if (event.pointerId !== drag?.pointerId) return;
-    const { placement, corner, view: originalView } = drag;
-    const screenX = event.clientX - drag.x;
-    const screenY = event.clientY - drag.y;
-    if (!placement) moveDrag(event);
-    endDrag();
-    if (!placement || Math.hypot(screenX, screenY) < 3) return;
-    const dx = screenX / originalView.scale;
-    const dy = screenY / originalView.scale;
-    const updated = corner ? resizeBoardImage(placement, dx, dy, corner)
-      : { ...placement, x: placement.x + dx, y: placement.y + dy };
+    moveDrag(event);
+    const { mode, placement, corner, additive, selectionBefore, moveIds, moved, x, y, view: originalView } = drag;
+    endDrag(false);
+    if (mode === 'pan') return;
+    if (mode === 'select') {
+      if (!moved && !additive) showSelection([]);
+      return;
+    }
+    if (!moved) {
+      if (mode === 'move') {
+        const id = placement.id;
+        if (additive) {
+          const next = new Set(selectionBefore);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          showSelection(next);
+        } else showSelection([id]);
+      }
+      return;
+    }
+    const dx = (event.clientX - x) / originalView.scale;
+    const dy = (event.clientY - y) / originalView.scale;
+    if (dx === 0 && dy === 0) return;
+    if (mode === 'move') {
+      applyHistory(history.edit(history.items.map(item => moveIds.has(item.id)
+        ? { ...item, x: item.x + dx, y: item.y + dy } : item)));
+      return;
+    }
+    const updated = resizeBoardImage(placement, dx, dy, corner);
     if (updated.x === placement.x && updated.y === placement.y &&
         updated.width === placement.width && updated.height === placement.height) return;
     applyHistory(history.edit(history.items.map(item => item.id === updated.id ? updated : item)));
+  }
+
+  function setSpaceHeld(held) {
+    spaceHeld = held;
+    viewport.toggleAttribute('data-pan-ready', held);
   }
 
   function wheelCanvas(event) {
@@ -359,12 +451,17 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
   }
 
   function handleKeys(event) {
-    if (event.defaultPrevented || event.altKey || event.target.isContentEditable
+    if (event.defaultPrevented || event.isComposing || event.altKey || event.target.isContentEditable
       || event.target.closest?.('input, textarea, select, [role="textbox"]')) return;
     if (event.target.closest?.('dialog') || viewport.closest('[inert]')) return;
     const key = event.key.toLowerCase();
     const modifier = event.ctrlKey || event.metaKey;
-    if (modifier && ['+', '=', '-'].includes(key)) {
+    if (key === ' ' && !modifier) {
+      if (!event.target.closest?.('button, a, summary') || viewport.contains(event.target)) {
+        event.preventDefault();
+        setSpaceHeld(true);
+      }
+    } else if (modifier && ['+', '=', '-'].includes(key)) {
       event.preventDefault();
       if (!drag && !pinch) {
         const factor = key === '-' ? 1 / 1.2 : 1.2;
@@ -377,7 +474,7 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
     } else if (event.ctrlKey && key === 'y') {
       event.preventDefault();
       redo();
-    } else if (selectedId !== null && !modifier
+    } else if (selectedIds.size > 0 && !modifier
       && (key === 'delete' || key === 'backspace')) {
       event.preventDefault();
       removeSelection();
@@ -401,6 +498,7 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
   }
 
   function dropFiles(event) {
+    if (isInternalDrag(event)) return;
     const files = Array.from(event.dataTransfer.files);
     if (files.length === 0) return;
     event.preventDefault();
@@ -421,7 +519,7 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
         if (!drag) {
           const visible = added.findLast(isInView);
           if (!visible) reveal(added[0]);
-          showSelection((visible ?? added[0]).id);
+          showSelection([(visible ?? added[0]).id]);
         }
       }
       const failed = results.find((result) => result.status === 'rejected');
@@ -446,21 +544,26 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
     pinch = null;
   }, { signal, passive: false });
   viewport.addEventListener('focusin', (event) => {
+    if (drag) return;
     const id = event.target.dataset.itemId;
     const item = history.items.find((entry) => entry.id === id);
     if (!item) return;
-    showSelection(id);
+    showSelection([id]);
     if (!isInView(item)) reveal(item);
   }, { signal });
   viewport.addEventListener('click', (event) => {
+    if (event.detail !== 0) return;
     const id = event.target.closest('.whiteboard-item')?.dataset.itemId;
-    if (id) showSelection(id);
+    if (id) showSelection([id]);
+  }, { signal });
+  viewport.addEventListener('contextmenu', event => {
+    if (event.ctrlKey && event.target.closest('.whiteboard-item')) event.preventDefault();
   }, { signal });
   viewport.addEventListener('auxclick', event => {
     if (event.button === 1) event.preventDefault();
   }, { signal });
   viewport.addEventListener('dragover', (event) => {
-    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    if (isInternalDrag(event) || !event.dataTransfer?.types.includes('Files')) return;
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'copy';
@@ -471,15 +574,29 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
   }, { signal });
   viewport.addEventListener('drop', dropFiles, { signal });
   window.addEventListener('keydown', handleKeys, { signal });
+  window.addEventListener('keyup', event => {
+    if (event.key === ' ') setSpaceHeld(false);
+  }, { signal });
+  window.addEventListener('blur', () => {
+    setSpaceHeld(false);
+    endDrag();
+  }, { signal });
 
+  renderView();
   renderItems();
-  if (history.items.length > 0 && !history.items.some(isInView)) reveal(history.items.at(-1));
+  if (!board.view && history.items.length > 0 && !history.items.some(isInView)) reveal(history.items.at(-1));
 
   function unmount() {
     endDrag();
+    flushView();
     listeners.abort();
     wrapper.remove();
   }
-  unmount.whenIdle = work.wait;
+  unmount.whenIdle = async () => {
+    do {
+      flushView();
+      await work.wait();
+    } while (pendingView);
+  };
   return unmount;
 }

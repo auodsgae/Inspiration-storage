@@ -177,7 +177,8 @@ func validState(state map[string]any) (int64, bool) {
 	trash, trashOK := byID(state["trash"], validLayout)
 	_, boardsOK := byID(state["boards"], func(board map[string]any) bool {
 		_, ok := byID(board["items"], validPlacement)
-		return ok
+		view, present := board["view"]
+		return ok && (!present || validBoardView(view))
 	})
 	if !activeOK || !trashOK || !boardsOK || !validSettings(state["settings"], labels) {
 		return 0, false
@@ -254,6 +255,17 @@ func knownLabels(value any, labels map[string]struct{}) bool {
 		}
 	}
 	return true
+}
+
+func validBoardView(value any) bool {
+	view, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, xOK := finiteNumber(view["x"])
+	_, yOK := finiteNumber(view["y"])
+	scale, scaleOK := finiteNumber(view["scale"])
+	return xOK && yOK && scaleOK && scale >= 0.125 && scale <= 8
 }
 
 func validPlacement(item map[string]any) bool {
