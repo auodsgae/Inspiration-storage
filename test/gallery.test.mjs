@@ -88,6 +88,40 @@ test('batch adds preserve the selected layouts’ existing labels and board plac
   assert.deepEqual(state.boards[1].items.map(item => item.layoutId), ['one', 'two']);
 });
 
+test('new layouts fill three columns and continue below the shortest column', () => {
+  const layouts = ['one', 'two', 'three', 'four', 'five'].map(id => ({ id, name: id, image: '/image' }));
+  const board = { id: 'board', items: [] };
+  const state = { layouts, boards: [board] };
+  const sizes = [
+    { width: 1280, height: 720 },
+    { width: 400, height: 600 },
+    { width: 1200, height: 600 },
+    { width: 1200, height: 600 },
+    { width: 1280, height: 720 },
+  ];
+  layouts.forEach((layout, index) => {
+    library.addLayoutToBoards(state, layout.id, [board.id], sizes[index], () => 'item-' + layout.id);
+  });
+  assert.deepEqual(board.items.map(({ x, y }) => [x, y]), [
+    [56, 56], [400, 56], [744, 56], [744, 240], [56, 260],
+  ]);
+});
+
+test('new layouts fit around manually positioned images and use open space above them', () => {
+  const existing = [
+    { id: 'occupied-left', layoutId: 'old', x: 120, y: 40, width: 500, height: 190 },
+    { id: 'occupied-low', layoutId: 'old-2', x: 740, y: 300, width: 320, height: 100 },
+  ];
+  const board = { id: 'board', items: structuredClone(existing) };
+  const layouts = ['one', 'two'].map(id => ({ id, name: id, image: '/image' }));
+  const state = { layouts, boards: [board] };
+  for (const { id } of layouts) {
+    assignBoards(state, id, [board.id], { width: 1280, height: 720 }, () => 'item-' + id);
+  }
+  assert.deepEqual(board.items.slice(0, 2), existing);
+  assert.deepEqual(board.items.slice(2).map(({ x, y }) => [x, y]), [[744, 56], [56, 254]]);
+});
+
 test('batch removing labels clears active and trashed assignments while protecting Favorite', () => {
   const state = {
     labels: [{ id: 'favorite' }, { id: 'one' }, { id: 'two' }, { id: 'rest' }],

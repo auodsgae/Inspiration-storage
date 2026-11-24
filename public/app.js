@@ -11,7 +11,6 @@ const dialog = document.querySelector('#dialog');
 const navigation = document.querySelector('#navigation');
 const navigationToggle = document.querySelector('#navigation-toggle');
 const sidebar = document.querySelector('#sidebar');
-const sidebarScrim = document.querySelector('#sidebar-scrim');
 const updateNotice = document.querySelector('#update-notice');
 const toast = document.querySelector('#toast');
 const tabs = ['explore', 'labels', 'whiteboards', 'settings', 'trash'];
@@ -22,6 +21,8 @@ const importTimeFormat = new Intl.DateTimeFormat('sv-SE', { dateStyle: 'short', 
 const ratios = [['any', 'allRatios'], ['16:9', 'wideRatio'], ['landscape', 'landscapeRatio'], ['square', 'squareRatio'], ['portrait', 'portraitRatio']];
 const noFilters = { query: '', labelIds: [], ratio: 'any' };
 const imageDimensions = new Map();
+const galleryColumnOptions = [3, 5, 7];
+const boardDragType = 'application/x-inspiration-layout';
 
 let state;
 let tab = 'explore';
@@ -32,6 +33,9 @@ let dimensionFrame = 0;
 let previewSequence = [];
 let previewIndex = -1;
 let boardId = '';
+let boardListOpen = false;
+let draggedLayoutId = '';
+let boardDropTarget = null;
 let bulkSelection = null;
 let stopBoard;
 let addDraft;
@@ -74,11 +78,16 @@ function error(key) {
   return new Error(t(key));
 }
 
-function showError(message) {
+function showToast(message, role) {
   clearTimeout(toastTimer);
+  toast.setAttribute('role', role);
   toast.textContent = message;
   toast.hidden = false;
   toastTimer = setTimeout(() => { toast.hidden = true; }, 7500);
+}
+
+function showError(message) {
+  showToast(message, 'alert');
 }
 
 async function api(path, options) {
@@ -183,7 +192,7 @@ function metadata(layout) {
   return labels || publisher || website ? `<span class="metadata">${labels}${website}${publisher}</span>` : '';
 }
 
-function card(layout) {
+function card(layout, draggable) {
   const id = html(layout.id);
   const favorite = layout.labels.includes('favorite');
   const heart = txt(favorite ? 'favoriteRemove' : 'favoriteAdd');
@@ -193,11 +202,15 @@ function card(layout) {
   return `<article class="card" data-layout="${id}">
     <button class="card-preview" type="button" ${activation} data-id="${id}" aria-label="${html(layout.name)}">
       ${bulkSelection ? '<span class="selection-mark" aria-hidden="true"></span>' : ''}
-      <img class="art" src="${html(layout.image)}" alt="" width="1280" height="720" loading="lazy" decoding="async">
+      <img class="art" src="${html(layout.image)}" alt="" width="1280" height="720" loading="lazy" decoding="async" draggable="${draggable}">
       <span class="card-body">${metadata(layout)}<span class="title">${html(layout.name)}</span></span>
     </button>
     ${bulkSelection ? '' : `<div class="card-actions">
-      <button type="button" class="icon-btn favorite" data-action="favorite" data-id="${id}" aria-pressed="${favorite}" aria-label="${heart}" title="${heart}">${favorite ? '♥' : '♡'}</button>
+      <button type="button" class="icon-btn favorite" data-action="favorite" data-id="${id}" aria-pressed="${favorite}" aria-label="${heart}" title="${heart}">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l8.13 8.13a1 1 0 0 0 1.42 0l8.13-8.13a5.5 5.5 0 0 0 0-7.78Z"/>
+        </svg>
+      </button>
       <button type="button" class="icon-btn" data-action="organize" data-id="${id}" aria-haspopup="dialog" aria-label="${txt('organize')}" title="${txt('organize')}">⋯</button>
     </div>`}
   </article>`;
@@ -240,6 +253,43 @@ function loadExploreDimensions() {
   }
 }
 
+function galleryColumns(settings = state.settings) {
+  const count = settings.galleryColumns;
+  return galleryColumnOptions.includes(count) ? count : galleryColumnOptions[0];
+}
+
+function nextGalleryColumns(count) {
+  return galleryColumnOptions[(galleryColumnOptions.indexOf(count) + 1) % galleryColumnOptions.length];
+}
+
+function updateGalleryColumns() {
+  const button = main.querySelector('[data-action="gallery-columns"]');
+  if (!button) return;
+  const count = galleryColumns();
+  const grid = main.querySelector('.grid');
+  if (grid) grid.dataset.columns = String(count);
+  const label = t('cycleGalleryColumns', { count, next: nextGalleryColumns(count) });
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  const step = 20 / count;
+  const tiles = Array.from({ length: count }, (_, column) => {
+    const x = 2.55 + column * step;
+    const width = step - 1.1;
+    return `<rect x="${x}" y="6" width="${width}" height="5.2" rx=".5"/>
+      <rect x="${x}" y="12.8" width="${width}" height="5.2" rx=".5"/>`;
+  }).join('');
+  button.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">${tiles}</svg>`;
+}
+
+async function cycleGalleryColumns() {
+  await change(saved => { saved.settings.galleryColumns = nextGalleryColumns(galleryColumns(saved.settings)); });
+  updateGalleryColumns();
+}
+
+function canDragGalleryImages() {
+  return tab === 'explore' && !bulkSelection && sidebar.hasAttribute('data-open') && state?.boards.length > 0;
+}
+
 function updateExploreResults() {
   const results = main.querySelector('.search-results');
   if (!results) return;
@@ -249,8 +299,9 @@ function updateExploreResults() {
   const loading = exploreFilter.ratio !== 'any' && readingDimensions > 0;
   main.querySelector('[data-result-count]').textContent = loading ? t('loadingDimensions')
     : t(layouts.length === 1 ? 'oneLayout' : 'manyLayouts', { count: layouts.length });
+  const draggable = canDragGalleryImages();
   results.innerHTML = `${bulkToolbar(layouts.map(layout => layout.id))}
-    ${layouts.length ? `<div class="grid">${layouts.map(card).join('')}</div>`
+    ${layouts.length ? `<div class="grid" data-columns="${galleryColumns()}">${layouts.map(layout => card(layout, draggable)).join('')}</div>`
       : loading ? '' : `<p class="empty">${txt(hasExploreFilters() ? 'noMatches' : 'emptyAll')}</p>`}`;
   if (hadFocus) {
     [...results.querySelectorAll('[data-action]')].find(button =>
@@ -300,12 +351,16 @@ function renderExplore() {
       </div>
     </div>
     <div class="search-results"></div>
-    <button type="button" class="fab primary" data-action="add" aria-label="${txt('add')}" title="${txt('add')}">
-      <span class="fab-plus" aria-hidden="true"></span>
-    </button>
+    <div class="gallery-actions">
+      <button type="button" class="fab primary gallery-columns" data-action="gallery-columns"></button>
+      <button type="button" class="fab primary" data-action="add" aria-label="${txt('add')}" title="${txt('add')}">
+        <span class="fab-plus" aria-hidden="true"></span>
+      </button>
+    </div>
     <div class="drop-indicator" aria-hidden="true" hidden>${txt('dropExplore')}</div>`;
   updateExploreControls();
   updateExploreResults();
+  updateGalleryColumns();
 }
 
 function updateExploreControls() {
@@ -527,6 +582,36 @@ function dismissUpdate() {
   renderUpdateStatus();
 }
 
+function renderNavigation() {
+  const buttons = tabs.map(id => {
+    const button = `<button class="nav-tab" type="button" data-action="navigate" data-tab="${id}"${id === tab ? ' aria-current="page"' : ''}>${txt(id)}</button>`;
+    if (id !== 'whiteboards') return button;
+    const toggle = txt(boardListOpen ? 'hideBoardList' : 'showBoardList');
+    return `<div class="nav-board-row">${button}
+      <button type="button" class="nav-board-toggle" aria-controls="sidebar-boards" aria-expanded="${boardListOpen}"
+        aria-label="${toggle}" title="${toggle}"><span aria-hidden="true"></span></button>
+    </div>
+    <ul class="nav-board-list" id="sidebar-boards"${boardListOpen ? '' : ' hidden'}>
+      ${state.boards.map(board => `<li><button type="button" class="nav-board-link" data-action="open-board" data-id="${html(board.id)}"
+        aria-label="${txt('openBoard', { name: board.name })}" title="${html(board.name)}"${boardId === board.id ? ' aria-current="location"' : ''}>${html(board.name)}</button></li>`).join('')
+        || `<li class="muted">${txt('noBoardChoices')}</li>`}
+    </ul>`;
+  });
+  navigation.innerHTML = '<span class="nav-highlight" aria-hidden="true"></span>' + buttons.join('');
+  highlightNavigation();
+}
+
+function setBoardList(open) {
+  boardListOpen = open;
+  const button = navigation.querySelector('.nav-board-toggle');
+  const label = t(open ? 'hideBoardList' : 'showBoardList');
+  button.setAttribute('aria-expanded', String(open));
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  navigation.querySelector('#sidebar-boards').hidden = !open;
+  highlightNavigation(navigation.querySelector('.nav-tab:hover, .nav-board-row:hover .nav-tab'));
+}
+
 function render() {
   stopBoard?.();
   stopBoard = undefined;
@@ -539,9 +624,7 @@ function render() {
   document.querySelector('#ratio').textContent = t('ratio');
   navigationToggle.setAttribute('aria-label', t('navigationMenu'));
   navigationToggle.title = t('navigationMenu');
-  navigation.innerHTML = '<span class="nav-highlight" aria-hidden="true"></span>' +
-    tabs.map(id => `<button class="nav-tab" type="button" data-action="navigate" data-tab="${id}"${id === tab ? ' aria-current="page"' : ''}>${txt(id)}</button>`).join('');
-  highlightNavigation();
+  renderNavigation();
   main.dataset.tab = tab;
   spec[tab]();
   renderUpdateStatus();
@@ -549,7 +632,6 @@ function render() {
 
 async function navigate(next, nextBoard = '') {
   const focusHeading = sidebar.contains(document.activeElement);
-  if (sidebar.hasAttribute('data-open')) setSidebar(false, focusHeading);
   const request = ++navigationRequest;
   if (stopBoard) await stopBoard.whenIdle();
   await saveQueue;
@@ -559,7 +641,7 @@ async function navigate(next, nextBoard = '') {
   bulkSelection = null;
   render();
   window.scrollTo(0, 0);
-  if (focusHeading && !sidebar.hasAttribute('data-open')) {
+  if (focusHeading) {
     const heading = main.querySelector('h1');
     heading.tabIndex = -1;
     heading.focus({ preventScroll: true });
@@ -570,36 +652,41 @@ function setSidebar(open, restoreFocus = false) {
   if (!open && restoreFocus) navigationToggle.focus({ preventScroll: true });
   if (open) highlightNavigation();
   sidebar.toggleAttribute('data-open', open);
-  sidebarScrim.toggleAttribute('data-open', open);
   sidebar.inert = !open;
-  main.inert = open;
-  updateNotice.inert = open;
+  if (!open) endBoardDrag();
+  const draggable = canDragGalleryImages();
+  for (const image of main.querySelectorAll('.card .art')) image.draggable = draggable;
   navigationToggle.setAttribute('aria-expanded', String(open));
 }
 
 function highlightNavigation(button) {
-  const target = button ?? navigation.querySelector('[aria-current="page"]');
+  const current = button ?? navigation.querySelector('.nav-tab[aria-current="page"]');
+  const target = current?.closest('.nav-board-row') ?? current;
   if (!target) return;
   navigation.style.setProperty('--nav-highlight-y', `${target.offsetTop}px`);
   navigation.style.setProperty('--nav-highlight-height', `${target.offsetHeight}px`);
 }
 
 navigation.addEventListener('pointerover', event => {
-  const button = event.target.closest('.nav-tab');
+  const button = event.target.closest('.nav-tab') ?? event.target.closest('.nav-board-row')?.querySelector('.nav-tab');
   if (button && event.pointerType !== 'touch') highlightNavigation(button);
 });
 navigation.addEventListener('pointerleave', () => highlightNavigation(navigation.querySelector('.nav-tab:focus-visible')));
 navigation.addEventListener('focusin', event => {
-  if (event.target.matches('.nav-tab:focus-visible')) highlightNavigation(event.target);
+  if (!event.target.matches(':focus-visible')) return;
+  const button = event.target.closest('.nav-tab') ?? event.target.closest('.nav-board-row')?.querySelector('.nav-tab');
+  if (button) highlightNavigation(button);
 });
 navigation.addEventListener('focusout', event => {
   if (!navigation.contains(event.relatedTarget)) highlightNavigation(navigation.querySelector('.nav-tab:hover'));
 });
 
 navigationToggle.addEventListener('click', () => setSidebar(!sidebar.hasAttribute('data-open')));
-sidebarScrim.addEventListener('click', () => setSidebar(false, true));
+navigation.addEventListener('click', event => {
+  if (event.target.closest('.nav-board-toggle')) setBoardList(!boardListOpen);
+});
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && sidebar.hasAttribute('data-open')) {
+  if (event.key === 'Escape' && !event.defaultPrevented && !dialog.open && sidebar.hasAttribute('data-open')) {
     event.preventDefault();
     setSidebar(false, true);
   }
@@ -1278,8 +1365,9 @@ async function toggleFavorite(id) {
       : [...layout.labels, 'favorite'];
   });
   if (tab === 'explore') {
-    renderExplore();
-    [...main.querySelectorAll('.favorite')].find(button => button.dataset.id === id)?.focus({ preventScroll: true });
+    updateExploreResults();
+    const button = [...main.querySelectorAll('.favorite')].find(item => item.dataset.id === id);
+    button?.setAttribute('data-pop', '');
   }
 }
 
@@ -1459,6 +1547,7 @@ const actions = {
   'delete-collection': deleteCollection,
   organize,
   favorite: toggleFavorite,
+  'gallery-columns': cycleGalleryColumns,
   add: () => addLayout(),
   'close-dialog': () => dialog.close(),
   'delete-layout': deleteFromExplore,
@@ -1571,7 +1660,7 @@ document.addEventListener('keydown', event => {
     }
     return;
   }
-  if (event.key !== ' ' || tab !== 'explore' || bulkSelection || sidebar.hasAttribute('data-open') ||
+  if (event.key !== ' ' || tab !== 'explore' || bulkSelection ||
       event.target.closest?.('button,input,select,textarea,a,summary,[contenteditable]')) return;
   const button = main.querySelector('.card:hover [data-action="preview"]') ?? main.querySelector('[data-action="preview"]');
   if (button) {
@@ -1583,6 +1672,80 @@ document.addEventListener('keydown', event => {
 function handlesExploreDrop() {
   return state && tab === 'explore' && (!dialog.open || dialog.dataset.kind === 'add');
 }
+
+function highlightBoardDrop(target) {
+  if (target === boardDropTarget) return;
+  boardDropTarget?.removeAttribute('data-drop-target');
+  boardDropTarget = target;
+  boardDropTarget?.setAttribute('data-drop-target', '');
+}
+
+function endBoardDrag() {
+  draggedLayoutId = '';
+  highlightBoardDrop(null);
+}
+
+main.addEventListener('dragstart', event => {
+  const image = event.target.closest('.card .art');
+  if (!image) return;
+  if (!canDragGalleryImages() || !event.dataTransfer) {
+    event.preventDefault();
+    return;
+  }
+  const id = image.closest('.card').dataset.layout;
+  event.dataTransfer.clearData();
+  event.dataTransfer.setData(boardDragType, '1');
+  event.dataTransfer.effectAllowed = 'copy';
+  draggedLayoutId = id;
+  image.addEventListener('dragend', endBoardDrag, { once: true });
+  if (!boardListOpen) setBoardList(true);
+});
+
+function isBoardDrag(event) {
+  return draggedLayoutId && canDragGalleryImages() && event.dataTransfer?.types.includes(boardDragType);
+}
+
+navigation.addEventListener('dragover', event => {
+  if (!isBoardDrag(event)) return;
+  const target = event.target.closest('.nav-board-link');
+  highlightBoardDrop(target);
+  if (!target) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+});
+
+navigation.addEventListener('dragleave', event => {
+  if (boardDropTarget && !boardDropTarget.contains(event.relatedTarget)) highlightBoardDrop(null);
+});
+
+navigation.addEventListener('drop', async event => {
+  const target = event.target.closest('.nav-board-link');
+  if (!target || !isBoardDrag(event)) return;
+  event.preventDefault();
+  const layout = layoutById(draggedLayoutId);
+  const id = target.dataset.id;
+  const board = state.boards.find(item => item.id === id);
+  endBoardDrag();
+  if (!layout || !board) return;
+  if (board.items.some(item => item.layoutId === layout.id)) {
+    showToast(t('alreadyOnBoard', { name: board.name }), 'status');
+    return;
+  }
+  try {
+    const size = imageDimensions.get(layout.image) ?? await imageSize(layout.image).catch(() => { throw error('unsupportedImage'); });
+    let added = false;
+    await change(saved => {
+      const destination = saved.boards.find(item => item.id === id);
+      if (!destination || !saved.layouts.some(item => item.id === layout.id)) throw error('notFound');
+      if (destination.items.some(item => item.layoutId === layout.id)) return;
+      addLayoutToBoards(saved, layout.id, [id], size);
+      added = true;
+    });
+    showToast(t(added ? 'droppedOnBoard' : 'alreadyOnBoard', { name: board.name }), 'status');
+  } catch (reason) {
+    showError(reason.message);
+  }
+});
 
 document.addEventListener('dragover', event => {
   if (!event.dataTransfer.types.includes('Files')) return;
@@ -1609,7 +1772,7 @@ document.addEventListener('drop', event => {
 });
 
 document.addEventListener('paste', event => {
-  if (!handlesExploreDrop() || sidebar.hasAttribute('data-open') || dialog.dataset.saving || !event.clipboardData) return;
+  if (!handlesExploreDrop() || dialog.dataset.saving || !event.clipboardData) return;
   const images = [...event.clipboardData.items].filter(item => item.kind === 'file' && item.type.startsWith('image/'))
     .map(item => item.getAsFile()).filter(Boolean);
   const files = images.length ? images : [...event.clipboardData.files].filter(file => imageMime.test(file.type));

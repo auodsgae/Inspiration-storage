@@ -1,3 +1,36 @@
+export const boardImageWidth = 320;
+const boardImageGap = 24;
+const boardColumnCount = 3;
+
+function openColumnY(occupied, x, startY, { width, height }) {
+  let y = startY;
+  for (const item of occupied) {
+    if (item.y >= y + height + boardImageGap) break;
+    if (item.x < x + width + boardImageGap && item.x + item.width + boardImageGap > x) {
+      y = Math.max(y, item.y + item.height + boardImageGap);
+    }
+  }
+  return y;
+}
+
+export function placeBoardImages(existingItems, images, origin = { x: 56, y: 56 }) {
+  const occupied = existingItems.toSorted((left, right) => left.y - right.y);
+  return images.map(image => {
+    let position = { x: origin.x, y: Infinity };
+    for (let column = 0; column < boardColumnCount; column++) {
+      const x = origin.x + column * (boardImageWidth + boardImageGap);
+      const y = openColumnY(occupied, x, origin.y, image);
+      if (y < position.y) position = { x, y };
+      if (y === origin.y) break;
+    }
+    const placed = { ...image, ...position };
+    const next = occupied.findIndex(item => item.y > placed.y);
+    if (next === -1) occupied.push(placed);
+    else occupied.splice(next, 0, placed);
+    return placed;
+  });
+}
+
 export function createBoardHistory(items, previous = [], following = []) {
   const history = {
     items,
@@ -351,7 +384,7 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
     }
   }
 
-  async function uploadPlacement(file, index, point) {
+  async function uploadBoardImage(file) {
     const { image } = await uploadImage(file);
     const preview = new window.Image();
     preview.src = image;
@@ -360,16 +393,11 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
     } catch {
       throw new Error(t('boardUploadError'));
     }
-    const scale = Math.min(1, 320 / preview.naturalWidth, 280 / preview.naturalHeight);
+    const scale = Math.min(1, boardImageWidth / preview.naturalWidth, 280 / preview.naturalHeight);
     const width = Math.max(1, Math.round(preview.naturalWidth * scale));
     const height = Math.max(1, Math.round(preview.naturalHeight * scale));
     const name = file.name.replace(/\.[^.]+$/u, '').trim() || t('boardImageName');
-    return {
-      id: window.crypto.randomUUID(), layoutId: null, name, image,
-      x: Math.round(point.x - width / 2 + index * 22),
-      y: Math.round(point.y - height / 2 + index * 22),
-      width, height,
-    };
+    return { id: window.crypto.randomUUID(), layoutId: null, name, image, width, height };
   }
 
   function dropFiles(event) {
@@ -380,12 +408,21 @@ export function mountBoard({ element, selectionName, board, saveItems, uploadIma
     delete viewport.dataset.dropping;
     const point = boardPoint(view, clientPoint(event));
     work.run(async () => {
-      const results = await Promise.allSettled(files.map((file, index) => uploadPlacement(file, index, point)));
+      const results = await Promise.allSettled(files.map(uploadBoardImage));
       if (signal.aborted) return;
-      const added = results.filter((result) => result.status === 'fulfilled').map((result) => result.value);
-      if (added.length > 0) {
+      const images = results.filter((result) => result.status === 'fulfilled').map((result) => result.value);
+      if (images.length > 0) {
+        const origin = {
+          x: Math.round(point.x - images[0].width / 2),
+          y: Math.round(point.y - images[0].height / 2),
+        };
+        const added = placeBoardImages(history.items, images, origin);
         applyHistory(history.edit([...history.items, ...added]));
-        if (!drag) showSelection(added.at(-1).id);
+        if (!drag) {
+          const visible = added.findLast(isInView);
+          if (!visible) reveal(added[0]);
+          showSelection((visible ?? added[0]).id);
+        }
       }
       const failed = results.find((result) => result.status === 'rejected');
       if (failed) showError(failed.reason?.message || t('boardUploadError'));

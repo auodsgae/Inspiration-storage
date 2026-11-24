@@ -1,4 +1,5 @@
 import { labelName, translator } from './locale.js';
+import { boardImageWidth, placeBoardImages } from './board.js';
 
 const labelLanguages = [translator('en'), translator('zh-Hant')];
 
@@ -43,24 +44,22 @@ export function filterLayouts(layouts, filter, labelNames = new Map(), sizes = n
 export function assignBoards(state, layoutId, selectedIds, size, makeId = () => crypto.randomUUID()) {
   const layout = state.layouts.find(item => item.id === layoutId);
   if (!layout) return;
-  const scale = Math.min(320 / size.width, 240 / size.height);
+  const scale = Math.min(boardImageWidth / size.width, 240 / size.height);
   for (const board of state.boards) {
     if (!selectedIds.includes(board.id)) {
       board.items = board.items.filter(item => item.layoutId !== layoutId);
       continue;
     }
     if (board.items.some(item => item.layoutId === layoutId)) continue;
-    const offset = 32 * (board.items.length % 7);
-    board.items.push({
+    const [placement] = placeBoardImages(board.items, [{
       id: makeId(),
       layoutId,
       name: layout.name,
       image: layout.image,
-      x: 56 + offset,
-      y: 56 + offset,
       width: Math.max(1, Math.round(size.width * scale)),
       height: Math.max(1, Math.round(size.height * scale)),
-    });
+    }]);
+    board.items.push(placement);
   }
 }
 
