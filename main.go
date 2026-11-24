@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -14,7 +13,6 @@ import (
 	"sync/atomic"
 
 	"github.com/auodsgae/Inspiration-storage/internal/library"
-	"github.com/auodsgae/Inspiration-storage/internal/updates"
 	"github.com/auodsgae/Inspiration-storage/internal/video"
 	"github.com/egoist/mygo"
 )
@@ -51,13 +49,7 @@ func runDesktop() error {
 	if err != nil {
 		return errors.New("Inspiration Storage could not open its bundled interface.")
 	}
-	version := installedVersion()
-	handler, err := library.New(dataDir, web, video.Import, library.UpdateEndpoint{
-		Version: version,
-		Check: func(ctx context.Context) (any, error) {
-			return updates.Check(ctx, version, runtime.GOOS, runtime.GOARCH)
-		},
-	})
+	handler, err := library.New(dataDir, web, video.Import, desktopUpdates(installedVersion()))
 	if err != nil {
 		return errors.New("Inspiration Storage could not open its local library.")
 	}

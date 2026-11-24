@@ -23,6 +23,7 @@ type Info struct {
 	Current     string `json:"current"`
 	Latest      string `json:"latest"`
 	Available   bool   `json:"available"`
+	InApp       bool   `json:"inApp,omitempty"`
 	DownloadURL string `json:"downloadURL"`
 	ReleaseURL  string `json:"releaseURL"`
 }

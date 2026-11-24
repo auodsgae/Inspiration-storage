@@ -19,7 +19,7 @@ The interface and library communicate through the MyGo webview protocol. The app
 
 The app removes a permanently deleted image file once no other layout, Trash entry or whiteboard uses it. At startup it also clears orphaned image files from an existing, readable library. This lets whiteboard Undo work for the duration of the editing session.
 
-The app checks the public GitHub release on launch by default. You can turn this off or check manually in Settings under Updates. The check requests the latest release for this repository and sends no library data or installed version. The download button opens the installer link in your default browser so you can install the update locally.
+The app checks public GitHub release information on launch by default. You can turn this off or check manually in Settings under Updates. The check sends no library data or installed version. Choose **Install and restart** to download a signed update, verify it, and restart the app. Updates replace the app files and keep the local library. When the installation folder is read-only, the app offers an installer download. Users upgrading from v0.1.3 or earlier need to install v0.1.4 manually once.
 
 Importing an uncached video link makes HTTPS requests to YouTube or Bilibili and their thumbnail hosts. The provider receives the video identifier or short-link code and the usual connection information, including the public IP address. The importer drops share tracking parameters and sends no cookies, library files, labels or whiteboard contents. Selecting an original source link opens it in the system browser.
 
@@ -38,5 +38,7 @@ To build the installers on macOS with NSIS available on your path:
 ```sh
 go tool mygo build -platform darwin/universal,windows/amd64,windows/arm64
 ```
+
+For a release, supply the matching private signing key to MyGo through `MYGO_UPDATER_PRIVATE_KEY`. Keep the key in private storage outside the repository and maintain a secure backup. Publish each platform's signed archive and `update-*.json` manifest with the installers in the same GitHub release.
 
 The packaged frontend is embedded from an explicit list of app files. Use a separate data directory for tests with sample data and keep personal libraries out of Git.

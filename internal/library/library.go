@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 const (
@@ -38,17 +39,19 @@ type APIError struct {
 
 func (e *APIError) Error() string { return e.Key }
 
-// UpdateEndpoint provides the bundled version and the optional release checker.
+// UpdateEndpoint provides the bundled version and the desktop updater.
 type UpdateEndpoint struct {
 	Version string
 	Check   func(context.Context) (any, error)
+	Install func(context.Context, string) error
 }
 
 type library struct {
-	dataDir  string
-	web      fs.FS
-	importer func(context.Context, string) (ImportedVideo, error)
-	update   UpdateEndpoint
+	dataDir          string
+	web              fs.FS
+	importer         func(context.Context, string) (ImportedVideo, error)
+	update           UpdateEndpoint
+	installingUpdate atomic.Bool
 
 	stateMu   sync.RWMutex
 	revision  int64
@@ -182,6 +185,8 @@ func (s *library) serve(w http.ResponseWriter, r *http.Request) error {
 			return err
 		}
 		return s.checkUpdate(w, r)
+	case "/api/update/install":
+		return s.installUpdate(w, r)
 	case "/api/state":
 		switch r.Method {
 		case http.MethodGet:
@@ -263,6 +268,39 @@ func (s *library) checkUpdate(w http.ResponseWriter, r *http.Request) error {
 		return failed
 	}
 	writeJSON(w, r, http.StatusOK, payload)
+	return nil
+}
+
+func (s *library) installUpdate(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return methodError(w, "POST")
+	}
+	if err := requireWriteMarker(r); err != nil {
+		return err
+	}
+	body, err := requestObject(w, r, 256, "invalidRequest")
+	if err != nil {
+		return err
+	}
+	version, _ := body["version"].(string)
+	if version == "" || len(version) > 64 || len(body) != 1 {
+		return &APIError{"invalidRequest", http.StatusBadRequest}
+	}
+	if s.update.Install == nil {
+		return &APIError{"updateInstallUnavailable", http.StatusConflict}
+	}
+	if !s.installingUpdate.CompareAndSwap(false, true) {
+		return &APIError{"updateInstallBusy", http.StatusConflict}
+	}
+	if err := s.update.Install(r.Context(), version); err != nil {
+		s.installingUpdate.Store(false)
+		var localized *APIError
+		if errors.As(err, &localized) {
+			return localized
+		}
+		return &APIError{"updateInstallFailed", http.StatusBadGateway}
+	}
+	writeJSON(w, r, http.StatusOK, []byte(`{"installed":true}`))
 	return nil
 }
 

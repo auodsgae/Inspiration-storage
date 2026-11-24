@@ -1,7 +1,15 @@
 {
   "name": "Inspiration Storage",
   "identifier": "com.auodsgae.inspiration-storage",
-  "version": "0.1.3",
-  "resources": ["resources/THIRD_PARTY_NOTICES.txt"],
-  "resourcesExclude": ["**"]
+  "version": "0.1.4",
+  "resources": [
+    "resources/THIRD_PARTY_NOTICES.txt"
+  ],
+  "resourcesExclude": [
+    "**"
+  ],
+  "updates": {
+    "publicKey": "+vMLhx/AK/THHQJtsjmKkuYwZUIdMdyWCM1oGKoiKJU=",
+    "github": "auodsgae/Inspiration-storage"
+  }
 }

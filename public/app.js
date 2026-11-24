@@ -504,10 +504,40 @@ function automaticUpdatesEnabled() {
 
 function updateLink(result) {
   if (!result?.available) return '';
+  if (result.inApp) {
+    return `<button class="btn primary" type="button" data-action="install-update">${txt('installUpdate')}</button>`;
+  }
   const url = result.downloadURL || result.releaseURL;
   if (!url) return '';
   const label = result.downloadURL ? 'downloadUpdate' : 'viewUpdateRelease';
   return `<a class="btn primary" href="${html(url)}" target="_blank" rel="noopener noreferrer">${txt(label)}</a>`;
+}
+
+async function installUpdate() {
+  if (dialog.open || !updateResult?.inApp) return;
+  const version = updateResult.latest;
+  openDialog('update-install', t('updateAvailable', { version }), `<div class="dialog-body">
+    <p role="status" data-update-install-status>${txt('installingUpdate')}</p>
+    <p class="form-error" role="alert" data-update-install-error hidden></p>
+  </div>`);
+  dialog.dataset.saving = 'true';
+  const close = dialog.querySelector('[data-action="close-dialog"]');
+  close.disabled = true;
+  try {
+    await stopBoard?.whenIdle();
+    await saveQueue;
+    await api('update/install', json('POST', { version }));
+    dialog.querySelector('[data-update-install-status]').textContent = t('restartingUpdate');
+  } catch (reason) {
+    dialog.querySelector('[data-update-install-status]').hidden = true;
+    const message = dialog.querySelector('[data-update-install-error]');
+    message.textContent = reason.message;
+    message.hidden = false;
+    delete dialog.dataset.saving;
+    close.disabled = false;
+    close.focus();
+    if (reason.message === t('updateChanged')) void checkForUpdates();
+  }
 }
 
 function updateMessage() {
@@ -1571,6 +1601,7 @@ const actions = {
   'bulk-restore': bulkRestore,
   'clear-trash': clearTrash,
   'check-update': () => checkForUpdates(),
+  'install-update': installUpdate,
   'dismiss-update': dismissUpdate,
   retry: start,
 };
