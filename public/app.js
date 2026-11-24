@@ -517,7 +517,7 @@ async function installUpdate() {
   if (dialog.open || !updateResult?.inApp) return;
   const version = updateResult.latest;
   openDialog('update-install', t('updateAvailable', { version }), `<div class="dialog-body">
-    <p role="status" data-update-install-status>${txt('installingUpdate')}</p>
+    <p role="status" tabindex="-1" data-focus data-update-install-status>${txt('installingUpdate')}</p>
     <p class="form-error" role="alert" data-update-install-error hidden></p>
   </div>`);
   dialog.dataset.saving = 'true';
