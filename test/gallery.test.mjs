@@ -19,6 +19,31 @@ test('uses a saved language and translates interpolated text', () => {
   assert.equal(translator('en')('deleteLayoutPrompt', { name: 'Sample' }), 'Delete “Sample” from Explore?');
 });
 
+test('image palette ranks visible colors by area and combines nearby shades', () => {
+  const rgba = (color, count) => Array.from({ length: count }, () => color).flat();
+  const pixels = Uint8ClampedArray.from([
+    ...rgba([192, 32, 48, 255], 20),
+    ...rgba([208, 32, 48, 255], 20),
+    ...rgba([32, 96, 208, 255], 30),
+    ...rgba([232, 192, 32, 255], 10),
+    ...rgba([255, 255, 255, 0], 40),
+  ]);
+  assert.deepEqual(library.imagePalette(pixels), ['#C82030', '#2060D0', '#E8C020']);
+  assert.deepEqual(library.imagePalette(Uint8ClampedArray.of(45, 45, 45, 255)), ['#2D2D2D']);
+  assert.deepEqual(library.imagePalette(Uint8ClampedArray.of(0, 0, 0, 0)), []);
+});
+
+test('masonry places each next card in the shortest column in input order', () => {
+  assert.deepEqual(library.packMasonry([210, 330, 160, 180, 100, 120], 3, 12), {
+    positions: [
+      { column: 0, top: 0 }, { column: 1, top: 0 }, { column: 2, top: 0 },
+      { column: 2, top: 172 }, { column: 0, top: 222 }, { column: 0, top: 334 },
+    ],
+    height: 454,
+  });
+  assert.deepEqual(library.packMasonry([], 7, 10), { positions: [], height: 0 });
+});
+
 test('keeps board placements when a layout is removed from Explore', () => {
   const layout = { id: 'entry', name: 'Sample', image: '/image', labels: ['favorite'] };
   const state = { layouts: [layout], trash: [], boards: [{ id: 'one', items: [] }, { id: 'two', items: [] }] };
@@ -199,12 +224,50 @@ test('ratio filters use saved or measured dimensions and omit unmeasured layouts
   assert.deepEqual(ids('any'), ['wide', 'tall', 'square', 'unknown']);
 });
 
+test('selected layouts can bypass label filters while still matching search and aspect ratio', () => {
+  const matching = { id: 'match', name: 'Design one', labels: ['chosen'], width: 640, height: 480 };
+  const selected = { id: 'selected', name: 'Design two', labels: ['other'], width: 480, height: 640 };
+  const hidden = { id: 'hidden', name: 'Design three', labels: ['other'], width: 640, height: 480 };
+  const layouts = [matching, selected, hidden];
+  const labels = { labelIds: ['chosen'] };
+  const selection = new Set(['selected']);
+  const filter = criteria => library.filterLayouts(layouts, { ...labels, ...criteria }, new Map(), new Map(), selection);
+  assert.deepEqual(filter({}), [matching, selected]);
+  assert.deepEqual(filter({ query: 'one' }), [matching]);
+  assert.deepEqual(filter({ ratio: 'landscape' }), [matching]);
+  assert.deepEqual(library.filterLayouts(layouts, labels), [matching]);
+});
+
 test('import labels recognize generated legacy names and explicitly marked renamed labels', () => {
   for (const name of ['Import 2026-11-23 12:34:56', '匯入 2026-11-23 12:34:56 (3)']) {
     assert.equal(library.isImportLabel({ name }), true);
   }
   assert.equal(library.isImportLabel({ name: 'Photo research', kind: 'import' }), true);
   assert.equal(library.isImportLabel({ name: 'Import notes' }), false);
+});
+
+test('manual label priority overrides legacy pin order and keeps Favorite first', () => {
+  const state = {
+    labels: [
+      { id: 'games' },
+      { id: 'favorite' },
+      { id: 'batch', pinned: true, kind: 'import' },
+      { id: 'website' },
+    ],
+    settings: {},
+  };
+  const ids = () => library.orderedLabels(state).map(label => label.id);
+  assert.deepEqual(ids(), ['favorite', 'batch', 'games', 'website']);
+
+  assert.equal(library.moveLabel(state, 'batch', 'website', true), true);
+  assert.deepEqual(ids(), ['favorite', 'games', 'website', 'batch']);
+  assert.deepEqual(library.orderedLabels(JSON.parse(JSON.stringify(state))).map(label => label.id), ids());
+
+  assert.equal(library.moveLabel(state, 'favorite', 'batch', true), false);
+  assert.equal(library.moveLabel(state, 'games', 'favorite', false), false);
+  assert.equal(library.moveLabel(state, 'games', 'missing', true), false);
+  state.labels.push({ id: 'new' });
+  assert.deepEqual(ids(), ['favorite', 'games', 'website', 'batch', 'new']);
 });
 
 test('merging labels updates active layouts, trash, and saved collections', () => {

@@ -2,7 +2,8 @@ import { labelName, selectLanguage, translator } from './locale.js';
 import {
   assignBoards, addLayoutToBoards, addLayoutLabels, addImportedLayouts, removeLabel, removeLabels,
   moveLayoutToTrash, restoreLayout, deleteTrashedLayout, filterLayouts, isImportLabel, mergeLabels,
-  videoKey, planImports, normalizeWebsiteUrl,
+  moveLabel, orderedLabels, searchText,
+  videoKey, planImports, normalizeWebsiteUrl, layoutDimensions, imagePalette, packMasonry,
 } from './library.js';
 import { mountBoard } from './board.js';
 
@@ -22,21 +23,40 @@ const ratios = [['any', 'allRatios'], ['16:9', 'wideRatio'], ['landscape', 'land
 const noFilters = { query: '', labelIds: [], ratio: 'any' };
 const imageDimensions = new Map();
 const galleryColumnOptions = [3, 5, 7];
-const boardDragType = 'application/x-inspiration-layout';
+const galleryDragType = 'application/x-inspiration-layout';
+const galleryDropSelector = '.nav-board-link, .nav-tab[data-tab="trash"]';
 
 let state;
 let tab = 'explore';
 let exploreFilter = { ...noFilters };
+let exploreScroll;
 let activeCollection = '';
 let readingDimensions = 0;
 let dimensionFrame = 0;
+let masonryFrame = 0;
+const masonryObserver = new ResizeObserver(() => {
+  if (masonryFrame) return;
+  masonryFrame = requestAnimationFrame(() => {
+    masonryFrame = 0;
+    layOutExploreGallery(main.querySelector('.grid'));
+  });
+});
+const labelQuickObserver = new ResizeObserver(entries => {
+  for (const { target } of entries) {
+    if (target.isConnected) fitQuickLabels(target);
+    else labelQuickObserver.unobserve(target);
+  }
+});
 let previewSequence = [];
 let previewIndex = -1;
 let boardId = '';
 let boardListOpen = false;
 let draggedLayoutId = '';
-let boardDropTarget = null;
+let galleryDropTarget = null;
 let bulkSelection = null;
+let bulkAnchorId = '';
+let controlClickId = '';
+let savingLabelOrder = false;
 let stopBoard;
 let addDraft;
 let toastTimer;
@@ -53,15 +73,12 @@ let t = translator(selectLanguage(null, navigator.language));
 
 const spec = { explore: renderExplore, labels: renderLabels, whiteboards: renderBoards, trash: renderTrash, settings: renderSettings };
 const bulkCommands = {
-  explore: [
-    ['compare-layouts', 'compareLayouts'],
-    ['bulk-labels', 'bulkApplyLabels'],
-    ['bulk-boards', 'boardChoices'],
-    ['bulk-delete', 'moveToTrash', true],
-  ],
   labels: [['merge-selected-labels', 'mergeLabels'], ['bulk-delete', 'deleteLabel', true]],
   whiteboards: [['bulk-delete', 'deleteBoard', true]],
   trash: [['bulk-restore', 'restoreLayout'], ['bulk-delete', 'deletePermanently', true]],
+};
+const exploreBulkShortcuts = {
+  delete: 'bulk-delete', backspace: 'bulk-delete', t: 'bulk-labels', w: 'bulk-boards', c: 'compare-layouts',
 };
 
 function html(value) {
@@ -156,22 +173,13 @@ function allShownSelected(ids) {
   return ids.length > 0 && ids.every(id => bulkSelection.has(id));
 }
 
-function canCompare() {
-  return bulkSelection?.size >= 2 && bulkSelection.size <= 4;
-}
-
-function bulkCommandEnabled(action) {
-  if (action === 'compare-layouts') return canCompare();
-  return Boolean(bulkSelection?.size);
-}
-
 function bulkToolbar(ids) {
   if (!bulkSelection) return '';
   return `<div class="bulk-toolbar" role="group" aria-label="${txt('bulkActions')}">
     <button type="button" class="btn" data-action="select-visible"${ids.length === 0 ? ' disabled' : ''}>${txt(allShownSelected(ids) ? 'deselectVisible' : 'selectVisible')}</button>
     <span class="count" data-bulk-count role="status">${txt('bulkCount', { count: bulkSelection.size })}</span>
     <div class="bulk-commands">
-      ${bulkCommands[tab].map(([action, label, danger]) => `<button type="button" class="btn${danger ? ' danger' : ''}" data-bulk-command data-action="${action}"${bulkCommandEnabled(action) ? '' : ' disabled'}>${txt(label)}</button>`).join('')}
+      ${bulkCommands[tab].map(([action, label, danger]) => `<button type="button" class="btn${danger ? ' danger' : ''}" data-bulk-command data-action="${action}"${bulkSelection.size ? '' : ' disabled'}>${txt(label)}</button>`).join('')}
     </div>
   </div>`;
 }
@@ -183,27 +191,47 @@ function bulkRow(id, name, body) {
   </label>`;
 }
 
-function metadata(layout) {
-  const labels = state.labels
+function labelTags(layout, labels = orderedLabels(state)) {
+  return labels
     .filter(label => layout.labels.includes(label.id))
-    .map(label => `<span class="tag">${html(labelName(label, t))}</span>`).join('');
+    .map(label => `<span class="tag">${html(labelName(label, t))}</span>`);
+}
+
+function metadata(layout) {
+  const labels = labelTags(layout).join('');
   const publisher = layout.publisher ? `<span class="publisher">${html(layout.publisher)}</span>` : '';
   const website = layout.siteName ? `<span class="publisher">${html(layout.siteName)}</span>` : '';
   return labels || publisher || website ? `<span class="metadata">${labels}${website}${publisher}</span>` : '';
 }
 
-function card(layout, draggable) {
+function imageSizeAttributes(layout) {
+  const size = layoutDimensions(layout, imageDimensions);
+  return size ? ` width="${size.width}" height="${size.height}"` : '';
+}
+
+function overlayLabels(tags) {
+  return tags.slice(0, 3).join('') + (tags.length > 3 ? '<span class="card-label-overflow">...</span>' : '');
+}
+
+function cardCaption(layout) {
+  const author = layout.publisher ? `<span class="publisher">${html(layout.publisher)}</span>` : '';
+  return `<span class="title">${html(layout.name)}</span>${author}`;
+}
+
+function card(layout, draggable, labelOrder) {
   const id = html(layout.id);
   const favorite = layout.labels.includes('favorite');
   const heart = txt(favorite ? 'favoriteRemove' : 'favoriteAdd');
+  const labels = labelTags(layout, labelOrder);
   const activation = bulkSelection
     ? `data-action="select-layout" data-bulk-id="${id}" aria-pressed="${bulkSelection.has(layout.id)}"`
     : 'data-action="preview" aria-haspopup="dialog"';
   return `<article class="card" data-layout="${id}">
     <button class="card-preview" type="button" ${activation} data-id="${id}" aria-label="${html(layout.name)}">
       ${bulkSelection ? '<span class="selection-mark" aria-hidden="true"></span>' : ''}
-      <img class="art" src="${html(layout.image)}" alt="" width="1280" height="720" loading="lazy" decoding="async" draggable="${draggable}">
-      <span class="card-body">${metadata(layout)}<span class="title">${html(layout.name)}</span></span>
+      <img class="art" src="${html(layout.image)}" alt=""${imageSizeAttributes(layout)} loading="lazy" decoding="async" draggable="${draggable}">
+      <span class="card-caption" aria-hidden="true">${cardCaption(layout)}</span>
+      <span class="card-labels" aria-hidden="true"${labels.length ? '' : ' hidden'}>${overlayLabels(labels)}</span>
     </button>
     ${bulkSelection ? '' : `<div class="card-actions">
       <button type="button" class="icon-btn favorite" data-action="favorite" data-id="${id}" aria-pressed="${favorite}" aria-label="${heart}" title="${heart}">
@@ -216,11 +244,6 @@ function card(layout, draggable) {
   </article>`;
 }
 
-function orderedLabels() {
-  const isPinned = label => label.id !== 'favorite' && Boolean(label.pinned);
-  return state.labels.toSorted((left, right) => Number(isPinned(right)) - Number(isPinned(left)));
-}
-
 function hasExploreFilters() {
   return Boolean(exploreFilter.query.trim() || exploreFilter.labelIds.length || exploreFilter.ratio !== 'any');
 }
@@ -229,16 +252,16 @@ function savedCollections() {
   return Array.isArray(state.settings.collections) ? state.settings.collections : [];
 }
 
-function currentLayouts(filter = exploreFilter) {
+function currentLayouts(filter = exploreFilter, selectedIds) {
   const names = new Map(state.labels.map(label => [label.id, `${labelName(label, t)} ${label.name}`]));
-  return filterLayouts(state.layouts, filter, names, imageDimensions);
+  return filterLayouts(state.layouts, filter, names, imageDimensions, selectedIds);
 }
 
 function loadExploreDimensions() {
-  const candidates = currentLayouts({ ...exploreFilter, ratio: 'any' });
+  const candidates = currentLayouts({ ...exploreFilter, ratio: 'any' }, bulkSelection);
   for (const layout of candidates) {
     if (readingDimensions >= 6) break;
-    if ((layout.width && layout.height) || imageDimensions.has(layout.image)) continue;
+    if (layoutDimensions(layout, imageDimensions) || imageDimensions.has(layout.image)) continue;
     const path = layout.image;
     imageDimensions.set(path, null);
     readingDimensions++;
@@ -247,7 +270,7 @@ function loadExploreDimensions() {
       if (dimensionFrame || tab !== 'explore' || exploreFilter.ratio === 'any') return;
       dimensionFrame = requestAnimationFrame(() => {
         dimensionFrame = 0;
-        if (tab === 'explore' && exploreFilter.ratio !== 'any') updateExploreResults();
+        if (tab === 'explore' && exploreFilter.ratio !== 'any') keepExploreScroll(updateExploreResults);
       });
     });
   }
@@ -262,12 +285,92 @@ function nextGalleryColumns(count) {
   return galleryColumnOptions[(galleryColumnOptions.indexOf(count) + 1) % galleryColumnOptions.length];
 }
 
+function layOutExploreGallery(grid) {
+  if (!grid) return;
+  const content = grid.firstElementChild;
+  const cards = [...content.children];
+  const width = cards[0].getBoundingClientRect().width;
+  const gap = parseFloat(getComputedStyle(grid).getPropertyValue('--gallery-gap'));
+  const heights = cards.map(card => card.getBoundingClientRect().height);
+  const { positions, height } = packMasonry(heights, Number(grid.dataset.columns), gap);
+  for (const [index, { column, top }] of positions.entries()) {
+    cards[index].style.left = `${column * (width + gap)}px`;
+    cards[index].style.top = `${top}px`;
+  }
+  content.style.height = `${height}px`;
+}
+
+function observeExploreGallery(grid) {
+  masonryObserver.disconnect();
+  if (!grid) return;
+  layOutExploreGallery(grid);
+  const content = grid.firstElementChild;
+  masonryObserver.observe(content);
+  for (const card of content.children) masonryObserver.observe(card);
+}
+
+function captureExploreScroll() {
+  const grid = main.querySelector('.grid');
+  const x = window.scrollX;
+  const y = window.scrollY;
+  const galleryX = grid?.scrollLeft ?? 0;
+  const galleryBounds = grid?.getBoundingClientRect();
+  const scrolledIntoGallery = y > 0 && galleryBounds?.top <= 0;
+  const anchor = scrolledIntoGallery ? [...grid.querySelectorAll('.card')].find(card => {
+    const bounds = card.getBoundingClientRect();
+    return bounds.bottom > 0 && bounds.top < window.innerHeight &&
+      bounds.right > galleryBounds.left && bounds.left < galleryBounds.right;
+  }) : null;
+  return { x, y, galleryX, galleryTop: galleryBounds?.top, anchorId: anchor?.dataset.layout, anchorTop: anchor?.getBoundingClientRect().top };
+}
+
+function restoreExploreScroll({ x, y, galleryX, galleryTop, anchorId, anchorTop }) {
+  const next = main.querySelector('.grid');
+  if (next) next.scrollLeft = galleryX;
+  const nextAnchor = anchorId && next?.querySelector(`[data-layout="${CSS.escape(anchorId)}"]`);
+  const top = nextAnchor
+    ? window.scrollY + nextAnchor.getBoundingClientRect().top - anchorTop
+    : y > 0 && galleryTop <= 0 && next
+      ? window.scrollY + next.getBoundingClientRect().top - galleryTop : y;
+  window.scrollTo({ left: x, top, behavior: 'instant' });
+}
+
+function keepExploreScroll(refresh) {
+  const position = captureExploreScroll();
+  refresh();
+  restoreExploreScroll(position);
+}
+
+function refreshExploreCard(id) {
+  const card = main.querySelector(`.grid [data-layout="${CSS.escape(id)}"]`);
+  const layout = currentLayouts().find(item => item.id === id);
+  if (!card || !layout) return null;
+  card.querySelector('.card-caption').innerHTML = cardCaption(layout);
+  card.querySelector('.card-preview').setAttribute('aria-label', layout.name);
+  const tags = labelTags(layout);
+  const overlay = card.querySelector('.card-labels');
+  overlay.innerHTML = overlayLabels(tags);
+  overlay.hidden = tags.length === 0;
+  const heart = card.querySelector('.favorite');
+  if (heart) {
+    const selected = layout.labels.includes('favorite');
+    const label = t(selected ? 'favoriteRemove' : 'favoriteAdd');
+    heart.setAttribute('aria-pressed', String(selected));
+    heart.setAttribute('aria-label', label);
+    heart.title = label;
+  }
+  return card;
+}
+
 function updateGalleryColumns() {
   const button = main.querySelector('[data-action="gallery-columns"]');
   if (!button) return;
   const count = galleryColumns();
   const grid = main.querySelector('.grid');
-  if (grid) grid.dataset.columns = String(count);
+  if (grid && Number(grid.dataset.columns) !== count) {
+    grid.dataset.columns = String(count);
+    layOutExploreGallery(grid);
+  }
   const label = t('cycleGalleryColumns', { count, next: nextGalleryColumns(count) });
   button.setAttribute('aria-label', label);
   button.title = label;
@@ -287,22 +390,26 @@ async function cycleGalleryColumns() {
 }
 
 function canDragGalleryImages() {
-  return tab === 'explore' && !bulkSelection && sidebar.hasAttribute('data-open') && state?.boards.length > 0;
+  return tab === 'explore' && !bulkSelection;
 }
 
 function updateExploreResults() {
   const results = main.querySelector('.search-results');
   if (!results) return;
+  if (draggedLayoutId) endGalleryDrag();
   if (exploreFilter.ratio !== 'any') loadExploreDimensions();
-  const layouts = currentLayouts();
+  const layouts = currentLayouts(exploreFilter, bulkSelection);
   const hadFocus = results.contains(document.activeElement) ? document.activeElement : null;
   const loading = exploreFilter.ratio !== 'any' && readingDimensions > 0;
   main.querySelector('[data-result-count]').textContent = loading ? t('loadingDimensions')
     : t(layouts.length === 1 ? 'oneLayout' : 'manyLayouts', { count: layouts.length });
   const draggable = canDragGalleryImages();
-  results.innerHTML = `${bulkToolbar(layouts.map(layout => layout.id))}
-    ${layouts.length ? `<div class="grid" data-columns="${galleryColumns()}">${layouts.map(layout => card(layout, draggable)).join('')}</div>`
-      : loading ? '' : `<p class="empty">${txt(hasExploreFilters() ? 'noMatches' : 'emptyAll')}</p>`}`;
+  const labelOrder = orderedLabels(state);
+  results.innerHTML = layouts.length ? `<div class="grid" data-columns="${galleryColumns()}">
+      <div class="masonry-content">${layouts.map(layout => card(layout, draggable, labelOrder)).join('')}</div>
+    </div>`
+      : loading ? '' : `<p class="empty">${txt(hasExploreFilters() ? 'noMatches' : 'emptyAll')}</p>`;
+  observeExploreGallery(results.querySelector('.grid'));
   if (hadFocus) {
     [...results.querySelectorAll('[data-action]')].find(button =>
       button.dataset.action === hadFocus.dataset.action && button.dataset.id === hadFocus.dataset.id)?.focus({ preventScroll: true });
@@ -310,17 +417,13 @@ function updateExploreResults() {
 }
 
 function renderExplore() {
-  const labels = orderedLabels();
+  const labels = orderedLabels(state);
   const ids = new Set(labels.map(label => label.id));
   exploreFilter.labelIds = exploreFilter.labelIds.filter(id => ids.has(id));
   if (!savedCollections().some(item => item.id === activeCollection)) activeCollection = '';
-  const history = labels.filter(label => isImportLabel(label) && !label.pinned);
-  const ordinary = labels.filter(label => !isImportLabel(label) || label.pinned);
-  const batchOpen = main.querySelector('.batch-filters')?.open || history.some(label => exploreFilter.labelIds.includes(label.id));
-  function tagFilter(label) {
-    return `<button type="button" class="filter" data-action="filter" data-id="${html(label.id)}" aria-pressed="false">${html(labelName(label, t))}</button>`;
-  }
-  main.innerHTML = `${pageHead('exploreTitle', bulkButton(state.layouts.length > 0))}
+  const previousPicker = main.querySelector('.label-picker');
+  const bulkLabel = txt(bulkSelection ? 'endBulkSelect' : 'bulkSelect');
+  main.innerHTML = `${pageHead('exploreTitle')}
     <div class="explore-tools">
       <div class="explore-search-row">
         <label class="field search-field"><span>${txt('searchLayouts')}</span>
@@ -339,25 +442,33 @@ function renderExplore() {
         </div>
       </div>
       <div class="filter-tools">
-        <div class="filters" role="group" aria-label="${txt('filter')}">
-          <button type="button" class="filter" data-action="filter" data-id="" aria-pressed="false">${txt('all')}</button>
-          ${ordinary.map(tagFilter).join('')}
+        ${labelPicker(labels, exploreFilter.labelIds, true)}
+        <div class="filter-meta">
+          <span class="count" role="status" data-result-count></span>
           <button type="button" class="btn plain" data-action="clear-filters" hidden>${txt('clearFilters')}</button>
         </div>
-        ${history.length ? `<details class="batch-filters"${batchOpen ? ' open' : ''}>
-          <summary class="btn plain">${txt('importBatches')}</summary><div class="filters">${history.map(tagFilter).join('')}</div>
-        </details>` : ''}
-        <span class="count" role="status" data-result-count></span>
       </div>
     </div>
     <div class="search-results"></div>
     <div class="gallery-actions">
+      <button type="button" class="fab primary" data-action="back-to-top" aria-label="${txt('backToTop')}" title="${txt('backToTop')}">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 5h14M12 19V9m-5 5 5-5 5 5"/></svg>
+      </button>
+      <button type="button" class="fab primary gallery-bulk" data-action="toggle-bulk" aria-pressed="${Boolean(bulkSelection)}"
+        aria-label="${bulkLabel}" title="${bulkLabel}"${!state.layouts.length && !bulkSelection ? ' disabled' : ''}>
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M9.5 2h10A2.5 2.5 0 0 1 22 4.5v10a2.5 2.5 0 0 1-2.5 2.5H19V8a3 3 0 0 0-3-3H7v-.5A2.5 2.5 0 0 1 9.5 2Z"/>
+          <path fill-rule="evenodd" d="M4.5 7h10A2.5 2.5 0 0 1 17 9.5v10a2.5 2.5 0 0 1-2.5 2.5h-10A2.5 2.5 0 0 1 2 19.5v-10A2.5 2.5 0 0 1 4.5 7Zm9.4 4.1a1.05 1.05 0 0 0-1.48 0l-4.3 4.3-1.63-1.63A1.05 1.05 0 0 0 5 15.26l2.38 2.38a1.05 1.05 0 0 0 1.48 0l5.04-5.05a1.05 1.05 0 0 0 0-1.49Z"/>
+        </svg>
+      </button>
       <button type="button" class="fab primary gallery-columns" data-action="gallery-columns"></button>
       <button type="button" class="fab primary" data-action="add" aria-label="${txt('add')}" title="${txt('add')}">
         <span class="fab-plus" aria-hidden="true"></span>
       </button>
     </div>
     <div class="drop-indicator" aria-hidden="true" hidden>${txt('dropExplore')}</div>`;
+  bindLabelPicker(main.querySelector('.label-picker'),
+    labelIds => setExploreFilter({ ...exploreFilter, labelIds }), previousPicker);
   updateExploreControls();
   updateExploreResults();
   updateGalleryColumns();
@@ -371,19 +482,17 @@ function updateExploreControls() {
   main.querySelector('[data-action="save-collection"]').disabled = !hasExploreFilters();
   main.querySelector('[data-action="delete-collection"]').hidden = !activeCollection;
   main.querySelector('[data-action="clear-filters"]').hidden = !hasExploreFilters();
-  for (const button of main.querySelectorAll('[data-action="filter"]')) {
-    button.setAttribute('aria-pressed', String(button.dataset.id
-      ? exploreFilter.labelIds.includes(button.dataset.id) : !exploreFilter.labelIds.length));
-  }
-  const batches = main.querySelector('.batch-filters');
-  if (batches?.querySelector('[aria-pressed="true"]')) batches.open = true;
+  main.querySelector('[data-action="filter"][data-id=""]').setAttribute('aria-pressed', String(!exploreFilter.labelIds.length));
+  syncLabelPicker(main.querySelector('.label-picker'), exploreFilter.labelIds);
 }
 
 function setExploreFilter(next, collection = '') {
-  exploreFilter = next;
-  activeCollection = collection;
-  updateExploreControls();
-  updateExploreResults();
+  keepExploreScroll(() => {
+    exploreFilter = next;
+    activeCollection = collection;
+    updateExploreControls();
+    updateExploreResults();
+  });
 }
 
 function renderTrash() {
@@ -393,7 +502,7 @@ function renderTrash() {
     ${bulkToolbar(layouts.map(layout => layout.id))}
     ${layouts.length ? `<ul class="management trash-list">${layouts.map(layout => {
       const body = `<span class="trashed-layout">
-          <img class="art" src="${html(layout.image)}" alt="" width="160" height="90">
+          <img class="art" src="${html(layout.image)}" alt=""${imageSizeAttributes(layout)}>
           <span class="trashed-details">
             <span class="title">${html(layout.name)}</span>
             ${metadata(layout)}
@@ -407,18 +516,23 @@ function renderTrash() {
 }
 
 function renderLabels() {
-  const labels = orderedLabels();
+  const labels = orderedLabels(state);
   const selectable = labels.filter(label => label.id !== 'favorite').map(label => label.id);
-  const ordinary = labels.filter(label => !isImportLabel(label));
-  const history = labels.filter(isImportLabel);
-  function labelList(group) {
-    return `<ul class="management">${group.map(label => {
+  const sortable = !bulkSelection && selectable.length > 1;
+  main.innerHTML = `${pageHead('labels', bulkButton(selectable.length > 0) + newButton('newLabel', 'new-label'))}
+    ${bulkToolbar(selectable)}
+    <ul class="management label-list">${labels.map(label => {
       const name = labelName(label, t);
       const id = html(label.id);
       const title = `<span class="title">${html(name)}</span>`;
       if (label.id === 'favorite') return `<li>${title}<span class="muted">${txt('builtIn')}</span></li>`;
       if (bulkSelection) return `<li>${bulkRow(label.id, name, title)}</li>`;
-      return `<li><span>${title}${label.pinned ? `<span class="muted">${txt('pinnedLabel')}</span>` : ''}</span>
+      const reorder = txt('reorderLabel', { name });
+      return `<li data-label-row="${id}"><div class="label-title">
+        ${sortable ? `<button class="icon-btn label-grip" type="button" draggable="true" aria-keyshortcuts="ArrowUp ArrowDown"
+          aria-label="${reorder}" title="${reorder}"><span aria-hidden="true"></span></button>` : ''}
+        <span>${title}${label.pinned ? `<span class="muted">${txt('pinnedLabel')}</span>` : ''}</span>
+        </div>
         <div class="label-actions">
           <button class="btn" type="button" data-action="pin-label" data-id="${id}">${txt(label.pinned ? 'unpinLabel' : 'pinLabel')}</button>
           <button class="btn" type="button" data-action="rename-label" data-id="${id}">${txt('renameLabel')}</button>
@@ -426,11 +540,7 @@ function renderLabels() {
         </div>
       </li>`;
     }).join('')}</ul>`;
-  }
-  main.innerHTML = `${pageHead('labels', bulkButton(selectable.length > 0) + newButton('newLabel', 'new-label'))}
-    ${bulkToolbar(selectable)}
-    ${labelList(ordinary)}
-    ${history.length ? `<h2 class="label-group">${txt('importBatches')}</h2>${labelList(history)}` : ''}`;
+  if (sortable) bindLabelReordering(main.querySelector('.label-list'));
 }
 
 function renderBoards() {
@@ -622,23 +732,21 @@ function renderNavigation() {
   const buttons = tabs.map(id => {
     const button = `<button class="nav-tab" type="button" data-action="navigate" data-tab="${id}"${id === tab ? ' aria-current="page"' : ''}>${txt(id)}</button>`;
     if (id !== 'whiteboards') return button;
-    const toggle = txt(boardListOpen ? 'hideBoardList' : 'showBoardList');
     return `<div class="nav-board-row">${button}
-      <button type="button" class="nav-board-toggle" aria-controls="sidebar-boards" aria-expanded="${boardListOpen}"
-        aria-label="${toggle}" title="${toggle}"><span aria-hidden="true"></span></button>
+      <button type="button" class="nav-board-toggle" aria-controls="sidebar-boards"><span aria-hidden="true"></span></button>
     </div>
-    <ul class="nav-board-list" id="sidebar-boards"${boardListOpen ? '' : ' hidden'}>
+    <ul class="nav-board-list" id="sidebar-boards">
       ${state.boards.map(board => `<li><button type="button" class="nav-board-link" data-action="open-board" data-id="${html(board.id)}"
         aria-label="${txt('openBoard', { name: board.name })}" title="${html(board.name)}"${boardId === board.id ? ' aria-current="location"' : ''}>${html(board.name)}</button></li>`).join('')
         || `<li class="muted">${txt('noBoardChoices')}</li>`}
     </ul>`;
   });
   navigation.innerHTML = '<span class="nav-highlight" aria-hidden="true"></span>' + buttons.join('');
-  highlightNavigation();
+  updateBoardList();
 }
 
-function setBoardList(open) {
-  boardListOpen = open;
+function updateBoardList() {
+  const open = boardListOpen || (state.boards.length > 0 && sidebar.hasAttribute('data-drag-open'));
   const button = navigation.querySelector('.nav-board-toggle');
   const label = t(open ? 'hideBoardList' : 'showBoardList');
   button.setAttribute('aria-expanded', String(open));
@@ -649,17 +757,18 @@ function setBoardList(open) {
 }
 
 function render() {
+  if (draggedLayoutId) endGalleryDrag();
   stopBoard?.();
   stopBoard = undefined;
+  if (tab !== 'explore') masonryObserver.disconnect();
   const language = selectLanguage(state.settings.language, navigator.language);
   t = translator(language);
   document.documentElement.lang = language;
   document.documentElement.dataset.theme = state.settings.theme;
   document.title = t('app');
   document.querySelector('#brand-name').textContent = t('app');
-  document.querySelector('#ratio').textContent = t('ratio');
   navigationToggle.setAttribute('aria-label', t('navigationMenu'));
-  navigationToggle.title = t('navigationMenu');
+  navigationToggle.title = `${t('navigationMenu')} (O)`;
   renderNavigation();
   main.dataset.tab = tab;
   spec[tab]();
@@ -672,11 +781,13 @@ async function navigate(next, nextBoard = '') {
   if (stopBoard) await stopBoard.whenIdle();
   await saveQueue;
   if (request !== navigationRequest) return;
+  if (tab === 'explore') exploreScroll = captureExploreScroll();
   tab = next;
   boardId = nextBoard;
-  bulkSelection = null;
+  resetBulk();
   render();
-  window.scrollTo(0, 0);
+  if (tab === 'explore' && exploreScroll) restoreExploreScroll(exploreScroll);
+  else window.scrollTo(0, 0);
   if (focusHeading) {
     const heading = main.querySelector('h1');
     heading.tabIndex = -1;
@@ -689,9 +800,7 @@ function setSidebar(open, restoreFocus = false) {
   if (open) highlightNavigation();
   sidebar.toggleAttribute('data-open', open);
   sidebar.inert = !open;
-  if (!open) highlightBoardDrop(null);
-  const draggable = canDragGalleryImages();
-  for (const image of main.querySelectorAll('.card .art')) image.draggable = draggable;
+  if (!open) highlightGalleryDrop(null);
   navigationToggle.setAttribute('aria-expanded', String(open));
 }
 
@@ -719,10 +828,25 @@ navigation.addEventListener('focusout', event => {
 
 navigationToggle.addEventListener('click', () => setSidebar(!sidebar.hasAttribute('data-open')));
 navigation.addEventListener('click', event => {
-  if (event.target.closest('.nav-board-toggle')) setBoardList(!boardListOpen);
+  if (!event.target.closest('.nav-board-toggle')) return;
+  boardListOpen = !boardListOpen;
+  updateBoardList();
 });
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && !event.defaultPrevented && !dialog.open && sidebar.hasAttribute('data-open')) {
+  if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
+  if (!dialog.open && bulkSelection) {
+    event.preventDefault();
+    toggleBulkMode();
+    return;
+  }
+  if (closeLabelPanel(dialog.open ? dialog : main)) {
+    event.preventDefault();
+    return;
+  }
+  if (dialog.open) return;
+  if (draggedLayoutId) {
+    endGalleryDrag();
+  } else if (sidebar.hasAttribute('data-open')) {
     event.preventDefault();
     setSidebar(false, true);
   }
@@ -769,8 +893,11 @@ function openDialog(kind, title, body, focus = '[data-focus]') {
   clearDraft();
   dialog.dataset.kind = kind;
   delete dialog.dataset.saving;
+  const heading = kind === 'preview'
+    ? `<button class="preview-title" type="button" data-action="rename-preview" title="${txt('renameImage')}">${html(title)}</button>`
+    : html(title);
   dialog.innerHTML = `<div class="dialog-heading">
-    <h2 id="dialog-title">${html(title)}</h2>
+    <h2 id="dialog-title">${heading}</h2>
     <button class="icon-btn" data-action="close-dialog" type="button" aria-label="${txt('close')}">×</button>
   </div>${body}`;
   if (!dialog.open) dialog.showModal();
@@ -794,10 +921,132 @@ function renderPreview(focus = '[data-action="close-dialog"]') {
     </div>
     <div class="dialog-body preview-meta">${metadata(layout)}${link}</div>
     <div class="preview-controls">
-      <button class="btn" type="button" data-action="previous-preview"${previewIndex === 0 ? ' disabled' : ''}><span aria-hidden="true">‹</span>${txt('previousLayout')}</button>
-      <span class="count" role="status">${txt('previewPosition', { index: previewIndex + 1, count: previewSequence.length })}</span>
-      <button class="btn" type="button" data-action="next-preview"${previewIndex + 1 === previewSequence.length ? ' disabled' : ''}>${txt('nextLayout')}<span aria-hidden="true">›</span></button>
+      <button class="btn" type="button" data-action="previous-preview" aria-keyshortcuts="ArrowLeft"${previewIndex === 0 ? ' disabled' : ''}><span aria-hidden="true">‹</span>${txt('previousLayout')}</button>
+      <div class="preview-palette" role="group" aria-label="${txt('previewPalette')}">
+        ${'<span class="preview-swatch" aria-hidden="true"></span>'.repeat(3)}
+      </div>
+      <button class="btn" type="button" data-action="next-preview" aria-keyshortcuts="ArrowRight"${previewIndex + 1 === previewSequence.length ? ' disabled' : ''}>${txt('nextLayout')}<span aria-hidden="true">›</span></button>
     </div>`, focus);
+  void fillPreviewPalette(dialog.querySelector('.preview-art'), dialog.querySelector('.preview-palette'));
+}
+
+function sampleImageColors(image) {
+  const canvas = document.createElement('canvas');
+  const scale = Math.min(1, 80 / Math.max(image.naturalWidth, image.naturalHeight));
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) return [];
+  context.imageSmoothingEnabled = false;
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return imagePalette(context.getImageData(0, 0, canvas.width, canvas.height).data);
+}
+
+async function readPreviewColors(image) {
+  await image.decode();
+  try {
+    return sampleImageColors(image);
+  } catch (reason) {
+    if (reason.name !== 'SecurityError') throw reason;
+  }
+
+  // Some webviews taint a canvas when drawing from the app's custom URL scheme.
+  const response = await fetch(image.currentSrc, { credentials: 'omit' });
+  if (!response.ok) return [];
+  const source = URL.createObjectURL(await response.blob());
+  try {
+    const copy = new Image();
+    copy.src = source;
+    await copy.decode();
+    return sampleImageColors(copy);
+  } finally {
+    URL.revokeObjectURL(source);
+  }
+}
+
+async function fillPreviewPalette(image, palette) {
+  const colors = await readPreviewColors(image).catch(() => []);
+  if (!dialog.open || !palette.isConnected || !colors.length) return;
+  [...palette.children].forEach((swatch, index) => {
+    const color = colors[index] ?? colors.at(-1);
+    const label = t(index === 0 ? 'previewPrimaryColor' : 'previewSecondaryColor', { color });
+    swatch.style.setProperty('--swatch-color', color);
+    swatch.dataset.color = color;
+    swatch.setAttribute('role', 'img');
+    swatch.setAttribute('aria-label', label);
+    swatch.removeAttribute('aria-hidden');
+    swatch.tabIndex = 0;
+  });
+}
+
+function editPreviewName() {
+  const layout = layoutById(previewSequence[previewIndex]);
+  if (!layout || dialog.dataset.kind !== 'preview' || dialog.querySelector('.preview-name-editor')) return;
+  const title = dialog.querySelector('.preview-title');
+  title.hidden = true;
+  title.insertAdjacentHTML('afterend', `<span class="preview-name-editor">
+    <input aria-label="${txt('renameImage')}" value="${html(layout.name)}" maxlength="300">
+    <button class="icon-btn" type="button" aria-label="${txt('save')}" title="${txt('save')}">✓</button>
+    <button class="icon-btn" type="button" aria-label="${txt('cancel')}" title="${txt('cancel')}">×</button>
+  </span>`);
+  const editor = title.nextElementSibling;
+  const input = editor.querySelector('input');
+  const [save, cancel] = editor.querySelectorAll('button');
+  const closeEditor = () => {
+    editor.remove();
+    title.hidden = false;
+    title.focus({ preventScroll: true });
+  };
+  async function saveName() {
+    if (dialog.dataset.saving) return;
+    const name = input.value.trim();
+    input.setCustomValidity(name ? '' : t('missingName'));
+    if (!input.reportValidity()) return;
+    if (name === layout.name) {
+      closeEditor();
+      return;
+    }
+    dialog.dataset.saving = 'true';
+    input.readOnly = save.disabled = cancel.disabled = true;
+    try {
+      await change(saved => {
+        const entry = saved.layouts.find(item => item.id === layout.id);
+        if (!entry) throw error('notFound');
+        entry.name = name;
+        for (const board of saved.boards) {
+          for (const item of board.items) {
+            if (item.layoutId === entry.id) item.name = name;
+          }
+        }
+      });
+      title.textContent = name;
+      dialog.querySelector('.preview-art').alt = name;
+      if (tab === 'explore' && !refreshExploreCard(layout.id)) keepExploreScroll(updateExploreResults);
+      closeEditor();
+    } catch (reason) {
+      input.readOnly = false;
+      input.setCustomValidity(reason.message);
+      input.reportValidity();
+    } finally {
+      delete dialog.dataset.saving;
+      input.readOnly = save.disabled = cancel.disabled = false;
+    }
+  }
+  input.addEventListener('input', () => input.setCustomValidity(''));
+  save.addEventListener('click', saveName);
+  cancel.addEventListener('click', closeEditor);
+  editor.addEventListener('keydown', event => {
+    if (event.isComposing) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (!dialog.dataset.saving) closeEditor();
+    } else if (event.key === 'Enter' && event.target === input) {
+      event.preventDefault();
+      void saveName();
+    }
+  });
+  input.focus({ preventScroll: true });
+  input.select();
 }
 
 function stepPreview(offset) {
@@ -811,9 +1060,11 @@ function stepPreview(offset) {
 }
 
 function compareLayouts() {
-  if (!canCompare()) return;
-  const layouts = [...bulkSelection].map(layoutById).filter(Boolean);
-  if (layouts.length < 2) return;
+  const layouts = [...(bulkSelection ?? [])].map(layoutById).filter(Boolean);
+  if (layouts.length < 2 || layouts.length > 4) {
+    showToast(t('compareSelectionLimit'), 'status');
+    return;
+  }
   openDialog('compare', t('compareTitle', { count: layouts.length }), `
     <div class="dialog-body">
       <div class="compare-grid">${layouts.map(layout => `<figure>
@@ -834,6 +1085,170 @@ function choices(title, name, options, empty) {
   </fieldset>`;
 }
 
+function labelPicker(labels, selected, explore = false) {
+  const quick = [];
+  const batches = [];
+  for (const label of labels) {
+    (isImportLabel(label) && !label.pinned ? batches : quick).push(label);
+  }
+  const selectedIds = new Set(selected);
+  const panelId = explore ? 'explore-label-panel' : 'destination-label-panel';
+  const filter = explore ? 'data-action="filter"' : 'data-label-toggle';
+  function labelOptions(group) {
+    return group.map(label => {
+      const name = labelName(label, t);
+      return `<label class="choice" data-label-search="${html(searchText(`${name} ${label.name}`))}">
+        <input type="checkbox"${explore ? '' : ' name="labels"'} value="${html(label.id)}"${selectedIds.has(label.id) ? ' checked' : ''}>
+        <span>${html(name)}</span>
+      </label>`;
+    }).join('');
+  }
+  return `<div class="label-picker"${explore ? ' data-explore-labels' : ''}>
+    <div class="label-picker-bar" role="group" aria-label="${txt(explore ? 'filter' : 'labelChoices')}">
+      ${explore ? `<button type="button" class="filter" data-action="filter" data-id="" aria-pressed="false">${txt('all')}</button>` : ''}
+      <div class="label-quick">${quick.map(label => {
+        const name = html(labelName(label, t));
+        return `<button type="button" class="filter" ${filter} data-id="${html(label.id)}"
+          aria-pressed="${selectedIds.has(label.id)}" title="${name}">${name}</button>`;
+      }).join('')}</div>
+      <button type="button" class="filter label-more" aria-expanded="false" aria-controls="${panelId}">${txt('moreLabels')}</button>
+    </div>
+    <div class="label-selection" hidden>
+      <div class="label-selected" role="group" aria-label="${txt('selectedLabels')}"></div>
+      ${explore ? '' : `<button class="btn plain label-clear" type="button" data-label-clear>${txt('clearLabels')}</button>`}
+    </div>
+    <div class="label-panel" id="${panelId}" hidden>
+      <label class="field search-field">
+        <input type="search" aria-label="${txt('searchLabels')}" placeholder="${txt('searchLabels')}" autocomplete="off">
+      </label>
+      <div class="label-panel-results">
+        <div class="label-options" data-label-section>${labelOptions(quick)}</div>
+        ${batches.length ? `<div class="label-panel-batches" data-label-section>
+          <p class="muted">${txt('importBatches')}</p>
+          <div class="label-options">${labelOptions(batches)}</div>
+        </div>` : ''}
+        <p class="muted" role="status" data-no-label-results hidden>${txt(labels.length ? 'noMatchingLabels' : 'noLabels')}</p>
+      </div>
+    </div>
+  </div>`;
+}
+
+function fitQuickLabels(bar) {
+  if (!bar.clientWidth) return;
+  const row = bar.querySelector('.label-quick');
+  const buttons = [...row.children];
+  for (const button of buttons) button.hidden = false;
+  const available = row.getBoundingClientRect().width;
+  const gap = parseFloat(getComputedStyle(row).columnGap);
+  const widths = buttons.map(button => button.getBoundingClientRect().width);
+  let occupied = 0;
+  buttons.forEach((button, index) => {
+    occupied += widths[index] + (index ? gap : 0);
+    button.hidden = button.dataset.id !== 'favorite' && occupied > available;
+  });
+}
+
+function syncLabelPicker(picker, selected) {
+  const ids = new Set(selected);
+  const remove = picker.hasAttribute('data-explore-labels') ? 'removeLabelFilter' : 'unselectLabel';
+  for (const button of picker.querySelectorAll('.label-quick button')) {
+    button.setAttribute('aria-pressed', String(ids.has(button.dataset.id)));
+  }
+  const chips = [];
+  for (const input of picker.querySelectorAll('.label-options input')) {
+    input.checked = ids.has(input.value);
+    if (!input.checked) continue;
+    const name = input.nextElementSibling.textContent;
+    chips.push(`<button type="button" class="filter label-chip" data-label-toggle data-label-remove data-id="${html(input.value)}"
+      aria-label="${txt(remove, { name })}" title="${html(name)}"><span>${html(name)}</span><span aria-hidden="true">×</span></button>`);
+  }
+  const selection = picker.querySelector('.label-selection');
+  selection.hidden = chips.length === 0;
+  selection.querySelector('.label-selected').innerHTML = chips.join('');
+}
+
+function setLabelPanelOpen(panel, open) {
+  const trigger = panel.closest('.label-picker').querySelector('.label-more');
+  panel.hidden = !open;
+  trigger.setAttribute('aria-expanded', String(open));
+  return trigger;
+}
+
+function closeLabelPanel(container) {
+  const panel = container.querySelector('.label-panel:not([hidden])');
+  if (!panel) return false;
+  setLabelPanelOpen(panel, false).focus({ preventScroll: true });
+  return true;
+}
+
+function bindLabelPicker(picker, onChange, previous) {
+  const bar = picker.querySelector('.label-picker-bar');
+  const more = picker.querySelector('.label-more');
+  const panel = picker.querySelector('.label-panel');
+  const search = panel.querySelector('input[type="search"]');
+  const sections = [...panel.querySelectorAll('[data-label-section]')].map(section =>
+    ({ section, options: [...section.querySelectorAll('[data-label-search]')] }));
+  const checkedIds = () => [...panel.querySelectorAll('input:checked')].map(input => input.value);
+  const select = ids => onChange ? onChange(ids) : syncLabelPicker(picker, ids);
+
+  function applySearch() {
+    const terms = searchText(search.value.trim()).split(/\s+/).filter(Boolean);
+    let results = 0;
+    for (const { section, options } of sections) {
+      let visible = 0;
+      for (const option of options) {
+        option.hidden = !terms.every(term => option.dataset.labelSearch.includes(term));
+        if (!option.hidden) visible++;
+      }
+      section.hidden = visible === 0;
+      results += visible;
+    }
+    panel.querySelector('[data-no-label-results]').hidden = results > 0;
+    panel.querySelector('.label-panel-results').scrollTop = 0;
+  }
+
+  if (previous) {
+    labelQuickObserver.unobserve(previous.querySelector('.label-picker-bar'));
+    setLabelPanelOpen(panel, !previous.querySelector('.label-panel').hidden);
+    search.value = previous.querySelector('input[type="search"]').value;
+  }
+  applySearch();
+  syncLabelPicker(picker, checkedIds());
+  fitQuickLabels(bar);
+  labelQuickObserver.observe(bar);
+  search.addEventListener('input', applySearch);
+  picker.addEventListener('change', event => {
+    if (event.target.matches('.label-options input')) select(checkedIds());
+  });
+  picker.addEventListener('click', event => {
+    if (event.target.closest('.label-more')) {
+      setLabelPanelOpen(panel, panel.hidden);
+      if (!panel.hidden) search.focus();
+      return;
+    }
+    if (event.target.closest('[data-label-clear]')) {
+      select([]);
+      more.focus({ preventScroll: true });
+      return;
+    }
+    const toggle = event.target.closest('[data-label-toggle]');
+    if (!toggle) return;
+    const ids = new Set(checkedIds());
+    const id = toggle.dataset.id;
+    if (ids.has(id)) ids.delete(id);
+    else ids.add(id);
+    const nearby = toggle.nextElementSibling ?? toggle.previousElementSibling;
+    select([...ids]);
+    if (toggle.hasAttribute('data-label-remove')) {
+      const neighbor = nearby && picker.querySelector(`[data-label-remove][data-id="${CSS.escape(nearby.dataset.id)}"]`);
+      (neighbor ?? more).focus({ preventScroll: true });
+    }
+  });
+  search.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.isComposing) event.preventDefault();
+  });
+}
+
 function newLabelRecord(name, labels, id = crypto.randomUUID()) {
   if (!name) throw error('missingName');
   const normalized = name.toLocaleLowerCase();
@@ -845,12 +1260,13 @@ function newLabelRecord(name, labels, id = crypto.randomUUID()) {
 }
 
 function destinationChoices(kind, selected, additions = []) {
-  const labels = kind === 'labels';
-  const records = labels ? orderedLabels() : state[kind];
-  const options = [...records, ...additions].map(item => ({
-    id: item.id, name: labels ? labelName(item, t) : item.name, checked: selected.includes(item.id),
-  }));
-  return choices(labels ? 'labelChoices' : 'boardChoices', kind, options, labels ? 'noLabels' : 'noBoardChoices');
+  if (kind === 'labels') {
+    return `<fieldset class="choices"><legend>${txt('labelChoices')}</legend>
+      ${labelPicker([...orderedLabels(state), ...additions], selected)}
+    </fieldset>`;
+  }
+  const options = [...state.boards, ...additions].map(item => ({ ...item, checked: selected.includes(item.id) }));
+  return choices('boardChoices', kind, options, 'noBoardChoices');
 }
 
 function destinationPicker(kind, selected = []) {
@@ -875,6 +1291,8 @@ function bindDestinationPicker(form, kind) {
   const nameInput = editor.querySelector('input');
   const notice = editor.querySelector('[role="alert"]');
   const additions = [];
+  const initialPicker = list.querySelector('.label-picker');
+  if (initialPicker) bindLabelPicker(initialPicker);
 
   function addDestination() {
     if (dialog.dataset.saving) return;
@@ -885,11 +1303,17 @@ function bindDestinationPicker(form, kind) {
         : { id: crypto.randomUUID(), name, items: [] };
       const selected = new FormData(form).getAll(kind);
       additions.push(item);
+      const previousPicker = list.querySelector('.label-picker');
       list.innerHTML = destinationChoices(kind, [...selected, item.id], additions);
       nameInput.value = '';
       notice.hidden = true;
       editor.open = false;
-      list.querySelector(`input[value="${item.id}"]`).focus();
+      if (previousPicker) {
+        bindLabelPicker(list.querySelector('.label-picker'), undefined, previousPicker);
+        list.querySelector(`[data-label-remove][data-id="${item.id}"]`)?.focus();
+      } else {
+        list.querySelector(`input[value="${item.id}"]`).focus();
+      }
     } catch (reason) {
       notice.textContent = reason.message;
       notice.hidden = false;
@@ -927,7 +1351,7 @@ function dialogButtons(leading = '', submit = 'save', danger = false) {
   </div>`;
 }
 
-function bindForm(onSubmit) {
+function bindForm(onSubmit, refreshView = render) {
   const form = dialog.querySelector('form');
   form.addEventListener('submit', async event => {
     event.preventDefault();
@@ -940,8 +1364,12 @@ function bindForm(onSubmit) {
     formError(form);
     try {
       if (await onSubmit(new FormData(form)) === false) return;
-      dialog.close();
-      render();
+      const refresh = () => {
+        dialog.close();
+        refreshView();
+      };
+      if (tab === 'explore' && dialog.dataset.kind !== 'add') keepExploreScroll(refresh);
+      else refresh();
     } catch (reason) {
       formError(form, reason.message);
     } finally {
@@ -1233,6 +1661,7 @@ function organize(id) {
   const currentBoards = state.boards.filter(board => board.items.some(item => item.layoutId === id)).map(board => board.id);
   openDialog('organize', t('organizeName', { name: layout.name }), `<form class="dialog-body">
     <div class="form-stack">
+      <label class="field"><span>${txt('layoutAuthor')}</span><input name="publisher" value="${html(layout.publisher)}"></label>
       ${destinationPicker('labels', layout.labels)}
       ${destinationPicker('boards', currentBoards)}
       <p class="form-error" role="alert" hidden></p>
@@ -1240,6 +1669,7 @@ function organize(id) {
     ${dialogButtons(`<button type="button" class="btn danger leading" data-action="delete-layout" data-id="${html(id)}">${txt('deleteLayout')}</button>`)}
   </form>`);
   const form = bindForm(async data => {
+    const publisher = String(data.get('publisher') || '').trim();
     const labels = data.getAll('labels');
     const selectedBoards = data.getAll('boards');
     const addsBoard = selectedBoards.some(board => !currentBoards.includes(board));
@@ -1249,9 +1679,12 @@ function organize(id) {
       if (!entry) throw error('notFound');
       saveNewLabels(saved, newLabels);
       saved.boards.push(...structuredClone(newBoards));
+      entry.publisher = publisher;
       entry.labels = labels.filter(label => saved.labels.some(item => item.id === label));
       assignBoards(saved, id, selectedBoards, size);
     });
+  }, () => {
+    if (newLabels.length || newBoards.length || !refreshExploreCard(id)) render();
   });
   const newLabels = bindDestinationPicker(form, 'labels');
   const newBoards = bindDestinationPicker(form, 'boards');
@@ -1366,10 +1799,107 @@ async function toggleLabelPin(id) {
   }
 }
 
+async function saveLabelOrder(id, targetId, after, keyboard = false) {
+  if (savingLabelOrder) return;
+  savingLabelOrder = true;
+  try {
+    let moved = false;
+    await change(saved => { moved = moveLabel(saved, id, targetId, after); });
+    if (!moved || tab !== 'labels' || bulkSelection) return;
+    const focusId = document.activeElement?.matches('.label-grip')
+      ? document.activeElement.closest('[data-label-row]').dataset.labelRow : null;
+    const { scrollX, scrollY } = window;
+    renderLabels();
+    window.scrollTo({ left: scrollX, top: scrollY, behavior: 'instant' });
+    if (focusId) {
+      main.querySelector(`[data-label-row="${CSS.escape(focusId)}"] .label-grip`)?.focus({ preventScroll: !keyboard });
+    }
+  } catch (reason) {
+    showError(reason.message);
+  } finally {
+    savingLabelOrder = false;
+  }
+}
+
+function bindLabelReordering(list) {
+  let dragged = null;
+  let target = null;
+
+  function clearTarget() {
+    target?.removeAttribute('data-label-drop');
+    target = null;
+  }
+
+  function endDrag() {
+    clearTarget();
+    dragged?.removeAttribute('data-label-dragging');
+    dragged = null;
+  }
+
+  function destination(event) {
+    const row = event.target.closest('[data-label-row]');
+    if (!row || row === dragged) return null;
+    const bounds = row.getBoundingClientRect();
+    const after = event.clientY > bounds.top + bounds.height / 2;
+    if ((after ? row.nextElementSibling : row.previousElementSibling) === dragged) return null;
+    return { row, after };
+  }
+
+  list.addEventListener('dragstart', event => {
+    const handle = event.target.closest('.label-grip');
+    if (!handle || !event.dataTransfer) return;
+    if (savingLabelOrder) {
+      event.preventDefault();
+      return;
+    }
+    dragged = handle.closest('[data-label-row]');
+    const bounds = dragged.getBoundingClientRect();
+    event.dataTransfer.setData('application/x-inspiration-label', dragged.dataset.labelRow);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setDragImage(dragged, event.clientX - bounds.left, event.clientY - bounds.top);
+    dragged.setAttribute('data-label-dragging', '');
+    handle.addEventListener('dragend', endDrag, { once: true });
+  });
+
+  list.addEventListener('dragover', event => {
+    if (!dragged || !event.dataTransfer) return;
+    const drop = destination(event);
+    if (target !== drop?.row) clearTarget();
+    if (!drop) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    target = drop.row;
+    target.setAttribute('data-label-drop', drop.after ? 'after' : 'before');
+  });
+
+  list.addEventListener('dragleave', event => {
+    if (target && !target.contains(event.relatedTarget)) clearTarget();
+  });
+
+  list.addEventListener('drop', event => {
+    if (!dragged) return;
+    const id = dragged.dataset.labelRow;
+    const drop = destination(event);
+    endDrag();
+    if (!drop) return;
+    event.preventDefault();
+    void saveLabelOrder(id, drop.row.dataset.labelRow, drop.after);
+  });
+
+  list.addEventListener('keydown', event => {
+    if (!event.target.matches('.label-grip') || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault();
+    const row = event.target.closest('[data-label-row]');
+    const after = event.key === 'ArrowDown';
+    const neighbor = after ? row.nextElementSibling : row.previousElementSibling;
+    if (neighbor?.dataset.labelRow) void saveLabelOrder(row.dataset.labelRow, neighbor.dataset.labelRow, after, true);
+  });
+}
+
 function mergeCatalogLabels() {
   if (tab !== 'labels' || !bulkSelection?.size) return;
   const sources = new Set(bulkSelection);
-  const targets = orderedLabels().filter(label => !sources.has(label.id));
+  const targets = orderedLabels(state).filter(label => !sources.has(label.id));
   openDialog('merge-labels', t('mergeTitle', { count: sources.size }), `<form class="dialog-body">
     <div class="form-stack">
       <p>${txt('mergeHint')}</p>
@@ -1400,11 +1930,17 @@ async function toggleFavorite(id) {
       ? layout.labels.filter(label => label !== 'favorite')
       : [...layout.labels, 'favorite'];
   });
-  if (tab === 'explore') {
-    updateExploreResults();
-    const button = [...main.querySelectorAll('.favorite')].find(item => item.dataset.id === id);
-    button?.setAttribute('data-pop', '');
+  if (tab !== 'explore') return;
+  const card = refreshExploreCard(id);
+  if (!card) {
+    keepExploreScroll(updateExploreResults);
+    return;
   }
+  const button = card.querySelector('.favorite');
+  if (!button) return;
+  button.removeAttribute('data-pop');
+  void button.offsetWidth;
+  button.setAttribute('data-pop', '');
 }
 
 function deleteFromExplore(id) {
@@ -1445,23 +1981,27 @@ function deleteWhiteboard(id) {
 }
 
 function toggleBulkMode() {
-  bulkSelection = bulkSelection ? null : new Set();
-  spec[tab]();
+  if (bulkSelection) resetBulk();
+  else bulkSelection = new Set();
+  if (tab === 'explore') keepExploreScroll(renderExplore);
+  else spec[tab]();
   main.querySelector('[data-action="toggle-bulk"]')?.focus({ preventScroll: true });
 }
 
-function updateBulkToolbar() {
+function updateBulkSelection() {
   const selections = [...main.querySelectorAll('[data-bulk-id]')];
-  const visibleIds = selections.map(element => element.dataset.bulkId);
   for (const element of selections) {
     const selected = bulkSelection.has(element.dataset.bulkId);
     if (element.type === 'checkbox') element.checked = selected;
     else element.setAttribute('aria-pressed', String(selected));
   }
-  main.querySelector('[data-bulk-count]').textContent = t('bulkCount', { count: bulkSelection.size });
-  main.querySelector('[data-action="select-visible"]').textContent = t(allShownSelected(visibleIds) ? 'deselectVisible' : 'selectVisible');
-  for (const command of main.querySelectorAll('[data-bulk-command]')) {
-    command.disabled = !bulkCommandEnabled(command.dataset.action);
+  const toolbar = main.querySelector('.bulk-toolbar');
+  if (!toolbar) return;
+  const visibleIds = selections.map(element => element.dataset.bulkId);
+  toolbar.querySelector('[data-bulk-count]').textContent = t('bulkCount', { count: bulkSelection.size });
+  toolbar.querySelector('[data-action="select-visible"]').textContent = t(allShownSelected(visibleIds) ? 'deselectVisible' : 'selectVisible');
+  for (const command of toolbar.querySelectorAll('[data-bulk-command]')) {
+    command.disabled = bulkSelection.size === 0;
   }
 }
 
@@ -1469,7 +2009,49 @@ function selectBulkItem(id, selected = !bulkSelection?.has(id)) {
   if (!bulkSelection) return;
   if (selected) bulkSelection.add(id);
   else bulkSelection.delete(id);
-  updateBulkToolbar();
+  updateBulkSelection();
+}
+
+function exploreCardIds() {
+  return [...main.querySelectorAll('.card-preview[data-id]')].map(button => button.dataset.id);
+}
+
+function setExploreSelection(ids, focusId) {
+  const entering = !bulkSelection;
+  bulkSelection = new Set(ids);
+  if (!entering) {
+    updateBulkSelection();
+    return;
+  }
+  keepExploreScroll(renderExplore);
+  if (focusId) main.querySelector(`.card-preview[data-id="${CSS.escape(focusId)}"]`)?.focus({ preventScroll: true });
+}
+
+function selectExploreLayout(id, extend = false) {
+  if (!bulkSelection) {
+    bulkAnchorId = id;
+    setExploreSelection([id], id);
+    return;
+  }
+  if (extend && bulkAnchorId) {
+    const ids = exploreCardIds();
+    const start = ids.indexOf(bulkAnchorId);
+    const end = ids.indexOf(id);
+    if (start >= 0 && end >= 0) {
+      for (const item of ids.slice(Math.min(start, end), Math.max(start, end) + 1)) bulkSelection.add(item);
+      updateBulkSelection();
+      return;
+    }
+  }
+  bulkAnchorId = id;
+  const selected = extend || !bulkSelection.has(id);
+  const layout = !selected && layoutById(id);
+  if (layout && exploreFilter.labelIds.some(labelId => !layout.labels.includes(labelId))) {
+    bulkSelection.delete(id);
+    keepExploreScroll(updateExploreResults);
+    return;
+  }
+  selectBulkItem(id, selected);
 }
 
 function selectVisible() {
@@ -1480,11 +2062,12 @@ function selectVisible() {
     if (deselect) bulkSelection.delete(id);
     else bulkSelection.add(id);
   }
-  updateBulkToolbar();
+  updateBulkSelection();
 }
 
 function resetBulk() {
   bulkSelection = null;
+  bulkAnchorId = '';
 }
 
 function chooseBulkDestinations(kind) {
@@ -1575,6 +2158,7 @@ const actions = {
   navigate: (_, button) => navigate(button.dataset.tab),
   filter,
   preview,
+  'rename-preview': editPreviewName,
   'previous-preview': () => stepPreview(-1),
   'next-preview': () => stepPreview(1),
   'compare-layouts': compareLayouts,
@@ -1584,6 +2168,9 @@ const actions = {
   organize,
   favorite: toggleFavorite,
   'gallery-columns': cycleGalleryColumns,
+  'back-to-top': () => window.scrollTo({
+    top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+  }),
   add: () => addLayout(),
   'close-dialog': () => dialog.close(),
   'delete-layout': deleteFromExplore,
@@ -1599,7 +2186,7 @@ const actions = {
   'back-boards': () => navigate('whiteboards'),
   'delete-board': deleteWhiteboard,
   'toggle-bulk': toggleBulkMode,
-  'select-layout': id => selectBulkItem(id),
+  'select-layout': id => selectExploreLayout(id),
   'select-visible': selectVisible,
   'bulk-labels': () => chooseBulkDestinations('labels'),
   'bulk-boards': () => chooseBulkDestinations('boards'),
@@ -1615,9 +2202,37 @@ const actions = {
 document.addEventListener('click', event => {
   const button = event.target.closest('[data-action]');
   if (!button || (dialog.dataset.saving && dialog.contains(button))) return;
+  if (tab === 'explore' && button.matches('.card-preview') && event.button === 0 &&
+      !event.altKey && (event.ctrlKey || event.metaKey || event.shiftKey)) {
+    event.preventDefault();
+    if (!event.ctrlKey || controlClickId !== button.dataset.id) selectExploreLayout(button.dataset.id, event.shiftKey);
+    return;
+  }
   const action = actions[button.dataset.action];
   if (action) Promise.resolve().then(() => action(button.dataset.id, button)).catch(reason => showError(reason.message));
 });
+
+main.addEventListener('pointerdown', () => { controlClickId = ''; });
+main.addEventListener('contextmenu', event => {
+  if (tab !== 'explore' || event.button !== 0 || !event.ctrlKey || event.altKey) return;
+  const card = event.target.closest('.card-preview');
+  if (!card) return;
+  // macOS may deliver a context menu instead of a click for a primary-button Control gesture.
+  event.preventDefault();
+  controlClickId = card.dataset.id;
+});
+main.addEventListener('pointerup', event => {
+  if (!controlClickId || event.button !== 0 || !event.ctrlKey) return;
+  const card = event.target.closest('.card-preview');
+  if (card?.dataset.id === controlClickId) selectExploreLayout(controlClickId, event.shiftKey);
+});
+
+main.addEventListener('load', event => {
+  const image = event.target;
+  if (image.matches?.('.grid .art') && image.naturalWidth > 0) {
+    imageDimensions.set(image.getAttribute('src'), { width: image.naturalWidth, height: image.naturalHeight });
+  }
+}, true);
 
 main.addEventListener('input', event => {
   if (tab === 'explore' && event.target.name === 'explore-query') {
@@ -1672,33 +2287,81 @@ main.addEventListener('change', async event => {
 dialog.addEventListener('close', () => {
   if (!dialog.open) clearDraft();
 });
+
+function isDialogBackdrop(event) {
+  if (event.target !== dialog) return false;
+  const { left, right, top, bottom } = dialog.getBoundingClientRect();
+  return event.clientX < left || event.clientX >= right || event.clientY < top || event.clientY >= bottom;
+}
+
+let pressedBackdrop = false;
+dialog.addEventListener('pointerdown', event => {
+  pressedBackdrop = event.button === 0 && isDialogBackdrop(event);
+});
 dialog.addEventListener('click', event => {
-  if (dialog.dataset.kind !== 'preview' || event.button !== 0) return;
-  if (event.target.matches('.preview-stage')) {
+  if (dialog.dataset.saving || event.button !== 0) return;
+  const kind = dialog.dataset.kind;
+  if (kind === 'preview' && event.target.matches('.preview-stage')) {
     dialog.close();
     return;
   }
-  if (event.target !== dialog) return;
-  const { left, right, top, bottom } = dialog.getBoundingClientRect();
-  if (event.clientX < left || event.clientX >= right || event.clientY < top || event.clientY >= bottom) {
+  if ((kind === 'preview' || kind === 'organize') && pressedBackdrop && isDialogBackdrop(event)) {
     dialog.close();
   }
 });
 dialog.addEventListener('cancel', event => {
-  if (dialog.dataset.saving) event.preventDefault();
+  if (dialog.dataset.saving || closeLabelPanel(dialog)) event.preventDefault();
 });
 
 document.addEventListener('keydown', event => {
-  if (event.defaultPrevented || event.isComposing || event.altKey || event.metaKey || event.ctrlKey) return;
+  if (event.defaultPrevented || event.isComposing || event.altKey) return;
+  const modified = event.metaKey || event.ctrlKey;
   if (dialog.open) {
-    if (dialog.dataset.kind === 'preview' && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+    if (!modified && dialog.dataset.kind === 'preview' && !dialog.dataset.saving && !event.target.closest?.('.preview-name-editor') &&
+       (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
       event.preventDefault();
       stepPreview(event.key === 'ArrowLeft' ? -1 : 1);
     }
     return;
   }
+  const key = event.key.toLowerCase();
+  // A closed dialog can still be the keyboard event target in WebKit.
+  const target = dialog.contains(event.target) ? main : event.target;
+  const typing = target.isContentEditable ||
+    target.closest?.('input:not([type="checkbox"], [type="radio"]), select, textarea, [role="textbox"]');
+  if (bulkSelection && modified && !event.shiftKey && !event.repeat && !typing && key === 'd') {
+    event.preventDefault();
+    toggleBulkMode();
+    return;
+  }
+  if (tab === 'explore' && !typing && !event.repeat) {
+    if (modified && !event.shiftKey && key === 'a') {
+      const ids = exploreCardIds();
+      if (ids.length || bulkSelection) {
+        event.preventDefault();
+        const focusId = target.closest?.('.card-preview')?.dataset.id;
+        bulkAnchorId = focusId ?? ids[0] ?? '';
+        setExploreSelection(ids, focusId);
+      }
+      return;
+    }
+    const action = !modified && bulkSelection?.size && exploreBulkShortcuts[key];
+    if (action) {
+      event.preventDefault();
+      actions[action]();
+      return;
+    }
+  }
+  if (modified) return;
+  if (key === 'o' && !event.repeat && !typing) {
+    event.preventDefault();
+    const open = !sidebar.hasAttribute('data-open');
+    setSidebar(open, !open);
+    if (open) navigation.querySelector('.nav-tab[aria-current="page"]')?.focus({ preventScroll: true });
+    return;
+  }
   if (event.key !== ' ' || tab !== 'explore' || bulkSelection ||
-      event.target.closest?.('button,input,select,textarea,a,summary,[contenteditable]')) return;
+      target.closest?.('button,input,select,textarea,a,summary,[contenteditable]')) return;
   const button = main.querySelector('.card:hover [data-action="preview"]') ?? main.querySelector('[data-action="preview"]');
   if (button) {
     event.preventDefault();
@@ -1710,20 +2373,25 @@ function handlesExploreDrop() {
   return state && tab === 'explore' && (!dialog.open || dialog.dataset.kind === 'add');
 }
 
-function highlightBoardDrop(target) {
-  if (target === boardDropTarget) return;
-  boardDropTarget?.removeAttribute('data-drop-target');
-  boardDropTarget = target;
-  boardDropTarget?.setAttribute('data-drop-target', '');
+function highlightGalleryDrop(target) {
+  if (target === galleryDropTarget) return;
+  galleryDropTarget?.removeAttribute('data-drop-target');
+  galleryDropTarget = target;
+  galleryDropTarget?.setAttribute('data-drop-target', '');
 }
 
-function endBoardDrag() {
+function endGalleryDrag() {
   draggedLayoutId = '';
-  highlightBoardDrop(null);
+  highlightGalleryDrop(null);
+  if (sidebar.hasAttribute('data-drag-open')) {
+    setSidebar(false);
+    sidebar.removeAttribute('data-drag-open');
+    updateBoardList();
+  }
 }
 
 function isGalleryDrag(event) {
-  return Boolean(draggedLayoutId || event.dataTransfer?.types.includes(boardDragType));
+  return Boolean(draggedLayoutId || event.dataTransfer?.types.includes(galleryDragType));
 }
 
 main.addEventListener('dragstart', event => {
@@ -1735,36 +2403,47 @@ main.addEventListener('dragstart', event => {
   }
   const id = image.closest('.card').dataset.layout;
   event.dataTransfer.clearData();
-  event.dataTransfer.setData(boardDragType, '1');
-  event.dataTransfer.effectAllowed = 'copy';
+  event.dataTransfer.setData(galleryDragType, '1');
+  event.dataTransfer.effectAllowed = 'copyMove';
   draggedLayoutId = id;
   main.querySelector('.drop-indicator')?.setAttribute('hidden', '');
-  image.addEventListener('dragend', endBoardDrag, { once: true });
-  if (!boardListOpen) setBoardList(true);
+  image.addEventListener('dragend', endGalleryDrag, { once: true });
+  if (!sidebar.hasAttribute('data-open')) {
+    sidebar.setAttribute('data-drag-open', '');
+    setSidebar(true);
+  } else if (state.boards.length) {
+    boardListOpen = true;
+  }
+  updateBoardList();
 });
 
 navigation.addEventListener('dragover', event => {
   if (!draggedLayoutId || !canDragGalleryImages() || !event.dataTransfer) return;
-  const target = event.target.closest('.nav-board-link');
-  highlightBoardDrop(target);
+  const target = event.target.closest(galleryDropSelector);
+  highlightGalleryDrop(target);
   if (!target) return;
   event.preventDefault();
-  event.dataTransfer.dropEffect = 'copy';
+  event.dataTransfer.dropEffect = target.dataset.tab === 'trash' ? 'move' : 'copy';
 });
 
 navigation.addEventListener('dragleave', event => {
-  if (boardDropTarget && !boardDropTarget.contains(event.relatedTarget)) highlightBoardDrop(null);
+  if (galleryDropTarget && !galleryDropTarget.contains(event.relatedTarget)) highlightGalleryDrop(null);
 });
 
 navigation.addEventListener('drop', async event => {
-  const target = event.target.closest('.nav-board-link');
+  const target = event.target.closest(galleryDropSelector);
   if (!target || !draggedLayoutId || !canDragGalleryImages()) return;
   event.preventDefault();
   event.stopPropagation();
-  const layout = layoutById(draggedLayoutId);
+  const layoutId = draggedLayoutId;
+  endGalleryDrag();
+  if (target.dataset.tab === 'trash') {
+    deleteFromExplore(layoutId);
+    return;
+  }
+  const layout = layoutById(layoutId);
   const id = target.dataset.id;
   const board = state.boards.find(item => item.id === id);
-  endBoardDrag();
   if (!layout || !board) return;
   if (board.items.some(item => item.layoutId === layout.id)) {
     showToast(t('alreadyOnBoard', { name: board.name }), 'status');
@@ -1806,7 +2485,7 @@ document.addEventListener('dragleave', event => {
 document.addEventListener('drop', event => {
   if (isGalleryDrag(event)) {
     event.preventDefault();
-    endBoardDrag();
+    endGalleryDrag();
     return;
   }
   const files = [...(event.dataTransfer?.files ?? [])];

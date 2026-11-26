@@ -53,6 +53,7 @@ func runDesktop() error {
 	if err != nil {
 		return errors.New("Inspiration Storage could not open its local library.")
 	}
+	mygo.App.SetPath(mygo.PathUserData, dataDir)
 	var trustedPage atomic.Pointer[mygo.Page]
 	if err := mygo.Protocol.Handle("mygo", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		page := trustedPage.Load()
@@ -68,6 +69,7 @@ func runDesktop() error {
 	mygo.App.WhenReady(func() {
 		win := mygo.NewWindow(mygo.WindowOptions{
 			Title: appName, Width: 1220, Height: 820, MinWidth: 480, MinHeight: 500,
+			Maximized: true, StateKey: "main",
 			Page: mygo.PageOptions{
 				DevTools:  mygo.DevToolsDisabled,
 				Session:   mygo.NewEphemeralSession(),

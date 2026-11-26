@@ -2,12 +2,17 @@ body:has(#board-host) {
   overflow: hidden;
 }
 
+.app-layout:has(#board-host) {
+  background: var(--surface);
+}
+
 main:has(#board-host) {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   height: 100vh;
   height: 100dvh;
-  margin: 0 0 0 var(--sidebar-offset);
+  margin: 0;
+  margin-inline-start: calc(var(--sidebar-offset) + var(--page-gutter));
   padding: 0;
 }
 
@@ -16,8 +21,7 @@ main:has(#board-host) {
   align-items: center;
   gap: clamp(8px, 2.4vw, 28px);
   min-height: 66px;
-  padding: 8px var(--page-gutter) 8px max(var(--page-gutter), calc(var(--page-gutter) + 50px - var(--sidebar-offset)));
-  transition: padding-inline-start var(--sidebar-duration) var(--ease-out-quint);
+  padding: 8px var(--page-gutter) 8px 0;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
 }

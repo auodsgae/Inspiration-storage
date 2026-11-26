@@ -3,13 +3,64 @@ import { boardImageWidth, placeBoardImages } from './board.js';
 
 const labelLanguages = [translator('en'), translator('zh-Hant')];
 
-function searchText(value = '') {
+export function searchText(value = '') {
   return value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 }
 
 function hasSize(size) {
   return size && Number.isFinite(size.width) && Number.isFinite(size.height) &&
     size.width > 0 && size.height > 0;
+}
+
+export function layoutDimensions(layout, sizes) {
+  return hasSize(layout) ? layout : sizes.get(layout.image);
+}
+
+export function imagePalette(pixels) {
+  const bins = new Map();
+  for (let index = 0; index < pixels.length; index += 4) {
+    const red = pixels[index];
+    const green = pixels[index + 1];
+    const blue = pixels[index + 2];
+    const alpha = pixels[index + 3];
+    if (alpha < 32) continue;
+    const key = ((red >> 4) << 8) | ((green >> 4) << 4) | (blue >> 4);
+    if (!bins.has(key)) bins.set(key, { totals: [0, 0, 0], weight: 0 });
+    const bin = bins.get(key);
+    bin.totals[0] += red * alpha;
+    bin.totals[1] += green * alpha;
+    bin.totals[2] += blue * alpha;
+    bin.weight += alpha;
+  }
+
+  const groups = [];
+  const similarityThreshold = 48 ** 2;
+  for (const { totals, weight } of [...bins.values()].sort((left, right) => right.weight - left.weight)) {
+    const rgb = totals.map(total => total / weight);
+    const group = groups.find(({ rgb: existing }) =>
+      rgb.reduce((distance, channel, index) => distance + (channel - existing[index]) ** 2, 0) < similarityThreshold);
+    if (group) {
+      const combinedWeight = group.weight + weight;
+      group.rgb = rgb.map((channel, index) => (group.rgb[index] * group.weight + channel * weight) / combinedWeight);
+      group.weight = combinedWeight;
+    } else {
+      groups.push({ rgb, weight });
+    }
+  }
+
+  return groups.sort((left, right) => right.weight - left.weight).slice(0, 3).map(({ rgb }) =>
+    '#' + rgb.map(channel => Math.round(channel).toString(16).padStart(2, '0')).join('').toUpperCase());
+}
+
+export function packMasonry(heights, columns, gap) {
+  const bottoms = Array(columns).fill(0);
+  const positions = heights.map(height => {
+    const top = Math.min(...bottoms);
+    const column = bottoms.indexOf(top);
+    bottoms[column] += height + gap;
+    return { column, top };
+  });
+  return { positions, height: Math.max(0, Math.max(...bottoms) - gap) };
 }
 
 function matchesRatio(size, ratio) {
@@ -24,12 +75,12 @@ function matchesRatio(size, ratio) {
   }
 }
 
-export function filterLayouts(layouts, filter, labelNames = new Map(), sizes = new Map()) {
+export function filterLayouts(layouts, filter, labelNames = new Map(), sizes = new Map(), selectedIds) {
   const { query = '', labelIds = [], ratio = 'any' } = filter;
   const words = searchText(query.trim()).split(/\s+/).filter(Boolean);
   return layouts.filter(layout => {
-    if (!labelIds.every(id => layout.labels.includes(id))) return false;
-    if (ratio !== 'any' && !matchesRatio(hasSize(layout) ? layout : sizes.get(layout.image), ratio)) return false;
+    if (!selectedIds?.has(layout.id) && !labelIds.every(id => layout.labels.includes(id))) return false;
+    if (ratio !== 'any' && !matchesRatio(layoutDimensions(layout, sizes), ratio)) return false;
     if (!words.length) return true;
 
     const names = layout.labels.flatMap(id => [
@@ -83,6 +134,27 @@ export function addLayoutLabels(state, layoutIds, labelIds) {
 export function isImportLabel(label) {
   return label.kind === 'import' ||
     /^(?:Import|匯入) \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?: \(\d+\))?$/.test(label.name);
+}
+
+export function orderedLabels(state) {
+  const manual = state.settings?.manualLabelOrder === true;
+  const priority = label => label.id === 'favorite' ? 2 : Number(!manual && Boolean(label.pinned));
+  return state.labels.toSorted((left, right) => priority(right) - priority(left));
+}
+
+export function moveLabel(state, id, targetId, after) {
+  if (id === 'favorite' || id === targetId || (targetId === 'favorite' && !after)) return false;
+  const labels = orderedLabels(state);
+  const from = labels.findIndex(label => label.id === id);
+  const target = labels.findIndex(label => label.id === targetId);
+  if (from < 0 || target < 0) return false;
+  const to = target - Number(from < target) + Number(after);
+  if (from === to) return false;
+  const [label] = labels.splice(from, 1);
+  labels.splice(to, 0, label);
+  state.labels = labels;
+  state.settings.manualLabelOrder = true;
+  return true;
 }
 
 export function addImportedLayouts(state, entries, labelIds, timeLabel, existingIds = []) {
